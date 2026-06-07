@@ -1,4 +1,15 @@
-# No-train suite — cumulative summary (real measurements, Jetson Thor SM110a)
+# No-train suite — cumulative summary
+
+## PRODUCTION RESULT (3-model serve+bench, the final deliverable)
+
+Typical acceptance (eps=0.09) at T=0.3, real serve, CUDA graphs:
+- Qwen3.6-27B: 43.0 -> **54.8 tok/s (+27%)**, tau 6.00 -> 7.66
+- Qwen3.5-122B-A10B: 41.4 -> **52.1 tok/s (+26%)**, tau 4.75 -> 6.00
+- Qwen3.6-35B-A3B: 127.5 -> 137.8 tok/s (+8%, within noise), tau 6.31 -> 6.56
+Win concentrates where baseline T>0 acceptance is weakest. T=0 stays baseline (guard).
+Full table + caveats: benchmarks/production_3model.md.
+
+ (real measurements, Jetson Thor SM110a)
 Baseline: `linear-opt-baseline` (20-prompt mixed seed set). Model Qwen3.6-35B-A3B-NVFP4 + DFlash.
 
 ## What actually moved (and what didn't)
