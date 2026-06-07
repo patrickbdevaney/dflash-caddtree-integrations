@@ -1,0 +1,144 @@
+--- a/vllm/model_executor/models/qwen3_next.py
++++ b/vllm/model_executor/models/qwen3_next.py
+@@ -6,8 +6,11 @@
+ from itertools import islice
+ 
+ import torch
++import torch.nn.functional as F
+ from torch import nn
+ 
++from vllm.forward_context import get_forward_context as _get_forward_context
++
+ from vllm._aiter_ops import rocm_aiter_ops
+ from vllm.compilation.decorators import support_torch_compile
+ from vllm.config import (
+@@ -202,6 +205,23 @@
+         return final_hidden_states.view(orig_shape)
+ 
+ 
++def _tree_attn_meta():
++    """Return a GDNAttentionMetadata in tree mode for the current forward, or
++    None. The full-attn layers read the tree structure (parent_index) from it to
++    build the DDTree ancestor mask (D11 split/eager attention)."""
++    try:
++        fc = _get_forward_context()
++        am = fc.attn_metadata
++        if not isinstance(am, dict):
++            return None
++        for m in am.values():
++            if getattr(m, "tree_mode", False) and getattr(m, "tree_parent_index", None):
++                return m
++    except Exception:
++        return None
++    return None
++
++
+ class Qwen3NextAttention(nn.Module):
+     def __init__(
+         self,
+@@ -312,12 +332,105 @@
+ 
+         attn_output = self.attn(q, k, v)
+ 
++        # D11: DDTree tree verification. self.attn above wrote the spec K/V to the
++        # paged cache (side effect we keep) but its causal-over-flat output is wrong
++        # for a tree. Recompute the spec tokens' attention with a single eager
++        # combined-mask SDPA: each spec node attends to ALL context + its tree
++        # ancestors. Gated on tree mode; linear path is byte-identical.
++        _tm = _tree_attn_meta()
++        if _tm is not None and q.shape[0] <= (_tm.tree_num_nodes + 2):
++            _eager = self._tree_eager_attn(q, k, v, _tm)
++            if _eager is not None:
++                attn_output = _eager
++
+         if self.attn_output_gate:
+             gate = torch.sigmoid(gate)
+             attn_output = attn_output * gate
+ 
+         output[:], _ = self.o_proj(attn_output)
+ 
++    def _tree_eager_attn(self, q, k, v, tm):
++        """Eager combined-mask attention for DDTree verification (D11).
++        Each spec query node attends to ALL context (gathered from the paged KV
++        cache) plus its tree ancestors. Single SDPA, GQA-aware. Returns the
++        attn output [nq, num_heads*head_dim], or None to fall back to self.attn.
++        """
++        try:
++            fc = _get_forward_context()
++            am = fc.attn_metadata[self.attn.layer_name]
++            seq_len = int(am.seq_lens[0].item())
++            bt = getattr(am, "block_table_tensor", None)
++            if bt is None:
++                bt = getattr(am, "block_table", None)
++            if bt is None:
++                return None
++            nq = q.shape[0]
++            ctx_len = seq_len - nq
++            if ctx_len < 0:
++                return None
++            H, Hkv, D = self.num_heads, self.num_kv_heads, self.head_dim
++            kv_cache = self.attn.kv_cache  # [2, num_blocks, block_size, Hkv, D]
++            if not hasattr(kv_cache, "shape") or kv_cache.numel() == 0:
++                return None
++            key_cache, val_cache = kv_cache[0], kv_cache[1]
++            bs = key_cache.shape[1]
++            dev = q.device
++
++            Q = q.view(nq, H, D)
++            spec_k = k.view(nq, Hkv, D)
++            spec_v = v.view(nq, Hkv, D)
++            if ctx_len > 0:
++                idx = torch.arange(ctx_len, device=dev)
++                blk = bt[0, (idx // bs)].long()
++                off = (idx % bs).long()
++                ctx_k = key_cache[blk, off].to(Q.dtype)  # [ctx_len, Hkv, D]
++                ctx_v = val_cache[blk, off].to(Q.dtype)
++                K = torch.cat([ctx_k, spec_k], dim=0)
++                V = torch.cat([ctx_v, spec_v], dim=0)
++            else:
++                K, V = spec_k, spec_v
++            L = K.shape[0]
++
++            # Ancestor mask over the spec region: flat pos i -> node i+1.
++            parent = tm.tree_parent_index
++            B = len(parent)
++            # Flat query pos i == tree node i (pos 0 == root). Node i attends to
++            # its ancestors (and itself); padding positions (>= B) attend to self.
++            anc = torch.zeros(nq, nq, dtype=torch.bool, device=dev)
++            for i in range(nq):
++                if i >= B:  # padding token: self-only
++                    anc[i, i] = True
++                    continue
++                j = i
++                while j != -1:
++                    if 0 <= j < nq:
++                        anc[i, j] = True
++                    j = parent[j]
++            mask = torch.zeros(nq, L, dtype=torch.bool, device=dev)
++            if ctx_len > 0:
++                mask[:, :ctx_len] = True
++            mask[:, ctx_len:] = anc
++
++            Qs = Q.permute(1, 0, 2).unsqueeze(0)   # [1, H, nq, D]
++            Ks = K.permute(1, 0, 2).unsqueeze(0)   # [1, Hkv, L, D]
++            Vs = V.permute(1, 0, 2).unsqueeze(0)
++            out = F.scaled_dot_product_attention(
++                Qs, Ks, Vs, attn_mask=mask.view(1, 1, nq, L),
++                scale=self.scaling, enable_gqa=True,
++            )
++            import os as _os
++            if _os.environ.get("DFLASH_DBG") and not getattr(Qwen3NextAttention, "_dbg_ok", False):
++                Qwen3NextAttention._dbg_ok = True
++                print(f"DBG_EAGER_OK nq={nq} ctx_len={ctx_len} L={L} H={H} Hkv={Hkv} D={D}", flush=True)
++            return out.squeeze(0).permute(1, 0, 2).reshape(nq, H * D)
++        except Exception as _e:
++            import os as _os
++            if _os.environ.get("DFLASH_DBG") and not getattr(Qwen3NextAttention, "_dbg_err", False):
++                Qwen3NextAttention._dbg_err = True
++                import traceback as _tb
++                print("DBG_EAGER_FAIL", repr(_e), flush=True); _tb.print_exc()
++            return None
++
+ 
+ class Qwen3NextDecoderLayer(nn.Module):
+     def __init__(

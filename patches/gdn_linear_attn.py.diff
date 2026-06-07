@@ -1,0 +1,54 @@
+--- a/vllm/model_executor/layers/mamba/gdn_linear_attn.py
++++ b/vllm/model_executor/layers/mamba/gdn_linear_attn.py
+@@ -1251,7 +1251,50 @@
+         # 2. Recurrent attention
+ 
+         # 2.1: Process the multi-query part
+-        if spec_sequence_masks is not None:
++        if spec_sequence_masks is not None and getattr(
++            attn_metadata, "tree_mode", False
++        ):
++            # D10: DDTree per-node depth-batched recurrence. Each tree node seeds
++            # its recurrent state from its PARENT's slot (num_accepted=2 trick:
++            # ssm_state_indices=[node_slot, parent_slot], T=1 -> seed slot[1]=parent,
++            # write slot[0]=node). Nodes are batched per BFS depth so every parent
++            # is written before its children; canonical (root) slot is only read.
++            # A baseline non-in-place call gives the correctly-shaped output tensor
++            # (pool untouched); real-node outputs are then overwritten in tree order.
++            core_attn_out_spec, last_recurrent_state = (
++                fused_sigmoid_gating_delta_rule_update(
++                    A_log=self.A_log, a=a, b=b, dt_bias=self.dt_bias,
++                    q=query_spec, k=key_spec, v=value_spec,
++                    initial_state=ssm_state, inplace_final_state=False,
++                    cu_seqlens=spec_query_start_loc[
++                        : attn_metadata.num_spec_decodes + 1
++                    ],
++                    ssm_state_indices=spec_state_indices_tensor,
++                    num_accepted_tokens=num_accepted_tokens,
++                    use_qk_l2norm_in_kernel=True,
++                )
++            )
++            for d in range(len(attn_metadata.tree_flat_pos)):
++                fp = attn_metadata.tree_flat_pos[d]
++                ns = attn_metadata.tree_node_slots[d]
++                ps = attn_metadata.tree_parent_slots[d]
++                n = fp.shape[0]
++                ssi_d = torch.stack([ns, ps], dim=1).contiguous()
++                nat_d = torch.full((n,), 2, dtype=torch.int32, device=fp.device)
++                cu_d = torch.arange(n + 1, dtype=torch.int32, device=fp.device)
++                out_d, _ = fused_sigmoid_gating_delta_rule_update(
++                    A_log=self.A_log,
++                    a=a[fp].contiguous(), b=b[fp].contiguous(),
++                    dt_bias=self.dt_bias,
++                    q=query_spec[:, fp].contiguous(),
++                    k=key_spec[:, fp].contiguous(),
++                    v=value_spec[:, fp].contiguous(),
++                    initial_state=ssm_state, inplace_final_state=True,
++                    cu_seqlens=cu_d, ssm_state_indices=ssi_d,
++                    num_accepted_tokens=nat_d, use_qk_l2norm_in_kernel=True,
++                )
++                core_attn_out_spec[:, fp] = out_d
++        elif spec_sequence_masks is not None:
+             core_attn_out_spec, last_recurrent_state = (
+                 fused_sigmoid_gating_delta_rule_update(
+                     A_log=self.A_log,

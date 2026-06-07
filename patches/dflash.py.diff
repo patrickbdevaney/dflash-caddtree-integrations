@@ -1,0 +1,19 @@
+--- a/vllm/v1/spec_decode/dflash.py
++++ b/vllm/v1/spec_decode/dflash.py
+@@ -74,6 +74,16 @@
+         # DFlash embeds mask tokens directly.
+         self.parallel_drafting_hidden_state_tensor = None
+ 
++        # DDTree tree-speculation state (one round's lifetime, reset in propose).
++        # tree_width from env during dev (config field wired later). W=1 = linear.
++        import os as _os
++        sc = vllm_config.speculative_config
++        cfg_w = getattr(sc, "tree_width", 1) if sc else 1
++        self.tree_width: int = int(_os.environ.get("DFLASH_TREE_WIDTH", cfg_w or 1))
++        self.current_tree = None
++        self.current_node_to_slot = None
++        self.current_context_lengths = None
++
+     @override
+     def allow_multiple_draft_kv_cache_groups(self) -> bool:
+         return True

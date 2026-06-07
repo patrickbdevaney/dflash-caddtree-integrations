@@ -1,0 +1,145 @@
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -396,6 +396,28 @@
+     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+ 
+ 
++def _find_accepted_leaf(tree, path_tokens, node_to_slot):
++    """Walk the DDTree following accepted path tokens; return the leaf node's
++    pool slot, or None if no path node was accepted (only the bonus)."""
++    n = len(tree.parent_index)
++    children: list[list[int]] = [[] for _ in range(n)]
++    for i in range(1, n):
++        children[tree.parent_index[i]].append(i)
++    current = 0
++    for tok in path_tokens:
++        nxt = None
++        for c in children[current]:
++            if tree.token_ids[c] == tok:
++                nxt = c
++                break
++        if nxt is None:
++            break
++        current = nxt
++    if current == 0 or current >= len(node_to_slot):
++        return None
++    return node_to_slot[current]
++
++
+ class GPUModelRunner(
+     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
+ ):
+@@ -974,6 +996,24 @@
+             )
+         return self._mamba_copy_bufs
+ 
++    def _get_gdn_state_pool(self):
++        """Return the shared GDN ssm_state pool (kv_cache[1]) of the first GDN
++        layer, for DDTree branch-state promotion. Cached after first lookup."""
++        pool = getattr(self, "_gdn_state_pool", None)
++        if pool is not None:
++            return pool
++        for module in self.model.modules():
++            mt = getattr(module, "mamba_type", None)
++            kvc = getattr(module, "kv_cache", None)
++            if mt and "gdn" in str(mt).lower() and kvc is not None:
++                try:
++                    self._gdn_state_pool = kvc[1]
++                    return self._gdn_state_pool
++                except Exception:
++                    continue
++        self._gdn_state_pool = None
++        return None
++
+     def _init_model_kwargs(self):
+         model_kwargs = dict[str, Any]()
+ 
+@@ -1469,6 +1509,27 @@
+         num_reqs = output_token_ids.size(0)
+         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
+ 
++        # Change D: DDTree GDN branch-state promotion (batch_size==1). Copy the
++        # accepted leaf's recurrent state into slot[num_accepted-1] -- exactly
++        # where linear DFlash keeps its accepted state -- so the existing
++        # align-mode postprocess_mamba carries it to the next round (and handles
++        # buffer rotation). Must run BEFORE postprocess_mamba below.
++        _drafter = getattr(self, "drafter", None)
++        _tree = getattr(_drafter, "current_tree", None) if _drafter else None
++        if _tree is not None and getattr(_drafter, "current_node_to_slot", None):
++            from vllm.v1.spec_decode.ddtree_state import promote_branch
++            acc = int((output_token_ids[0] != -1).sum().item())
++            path_tokens = output_token_ids[0][: max(0, acc - 1)].tolist()
++            leaf_slot = _find_accepted_leaf(
++                _tree, path_tokens, _drafter.current_node_to_slot
++            )
++            spec_slots = getattr(_drafter, "current_spec_slots", None)
++            if leaf_slot is not None and spec_slots is not None:
++                dest = spec_slots[min(acc - 1, len(spec_slots) - 1)]
++                pool = self._get_gdn_state_pool()
++                if pool is not None and dest != leaf_slot:
++                    promote_branch(pool, dest, leaf_slot)
++
+         if self.cache_config.mamba_cache_mode == "align":
+             for i, num_tokens in enumerate(
+                 self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+@@ -2039,6 +2100,24 @@
+             self.positions[:total_num_scheduled_tokens],
+         )
+ 
++        # Change A: tree RoPE positions. KV slot mapping above used SEQUENTIAL
++        # positions (so each tree node gets a distinct KV slot). For RoPE,
++        # overwrite with DEPTH-based positions (sibling nodes at the same tree
++        # depth share a position), so positional encoding reflects tree depth.
++        # batch_size==1 spec-decode mode.
++        _drafter = getattr(self, "drafter", None)
++        _tree = getattr(_drafter, "current_tree", None) if _drafter else None
++        if _tree is not None:
++            _ctx = int(self.num_computed_tokens[0])
++            _depths = _tree.depth  # flat query pos i == node i; depth[0]=0 (root)
++            _npos = min(total_num_scheduled_tokens, len(_depths))
++            if _npos > 0:
++                _pos = torch.tensor(
++                    [_ctx + _depths[j] - 1 for j in range(_npos)],
++                    dtype=self.positions.dtype, device=self.positions.device,
++                )
++                self.positions[:_npos] = _pos
++
+         # Copy the tensors to the GPU.
+         self._prepare_input_ids(
+             scheduler_output,
+@@ -2101,6 +2180,16 @@
+             spec_decode_metadata = self._calc_spec_decode_metadata(
+                 num_draft_tokens, cu_num_tokens
+             )
++            # Change B: attach the current DDTree structure so the rejection
++            # sampler can walk the tree for acceptance (batch_size==1 mode).
++            _drafter = getattr(self, "drafter", None)
++            _tree = getattr(_drafter, "current_tree", None) if _drafter else None
++            if _tree is not None:
++                spec_decode_metadata.tree_parent_index = _tree.parent_index
++                spec_decode_metadata.tree_token_ids = _tree.token_ids
++            else:
++                spec_decode_metadata.tree_parent_index = None
++                spec_decode_metadata.tree_token_ids = None
+             logits_indices = spec_decode_metadata.logits_indices
+             num_sampled_tokens = num_draft_tokens + 1
+             # For DECODE only cuda graph of some attention backends (e.g., GDN).
+@@ -6451,6 +6540,18 @@
+                     if not self.parallel_config.use_ubatching
+                     else self.parallel_config.num_ubatches,
+                 )
++        # D2: give the GDN metadata builder a reference to the drafter so build()
++        # can read the current DDTree (tree-mode branch routing) and stash
++        # node_to_slot for acceptance/promotion.
++        if getattr(self, "drafter", None) is not None:
++            for _groups in self.attn_groups:
++                for _ag in _groups:
++                    try:
++                        _b = _ag.get_metadata_builder()
++                    except Exception:
++                        continue
++                    if isinstance(_b, GDNAttentionMetadataBuilder):
++                        _b.drafter = self.drafter
+         # Calculate reorder batch threshold (if needed)
+         # Note (tdoublep): do this *after* constructing builders,
+         # because some of them change the threshold at init time.

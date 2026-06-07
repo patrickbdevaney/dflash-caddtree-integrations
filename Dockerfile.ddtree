@@ -1,0 +1,33 @@
+# Overlay image for DDTree tree speculation on GDN-hybrid MoE.
+# Strategy 1: COPY patched/new Python files onto the byte-identical base image
+# (vllm-dflash-thor:fa-native). No C++/CUDA recompile — only Python changes.
+# Build: docker build -f Dockerfile.ddtree -t vllm-dflash-thor:ddtree .
+FROM vllm-dflash-thor:fa-native
+
+ARG VLLM=/opt/venv/lib/python3.12/site-packages/vllm
+
+# --- INVARIANT 1: GDN state-block allocator (env-gated, no-op by default) ---
+COPY image-src/abstract.py ${VLLM}/model_executor/layers/mamba/abstract.py
+
+# --- 4c + D10: GDN branch-routing metadata + per-node depth-batched recurrence ---
+COPY image-src/gdn_attn.py ${VLLM}/v1/attention/backends/gdn_attn.py
+COPY image-src/gdn_linear_attn.py ${VLLM}/model_executor/layers/mamba/gdn_linear_attn.py
+COPY image-src/gpu_model_runner.py ${VLLM}/v1/worker/gpu_model_runner.py
+
+# --- Change C: tree-aware acceptance in the rejection sampler ---
+COPY image-src/rejection_sampler.py ${VLLM}/v1/sample/rejection_sampler.py
+
+# --- D11: eager combined-mask (context-full + tree-ancestor) attention for the
+#     full-attention layers during tree verification (no FlexAttention needed) ---
+COPY image-src/qwen3_next.py ${VLLM}/model_executor/models/qwen3_next.py
+
+# --- New modules: DDTree builder + GDN branch-state machinery ---
+COPY image-src/ddtree.py        ${VLLM}/v1/spec_decode/ddtree.py
+COPY image-src/ddtree_state.py  ${VLLM}/v1/spec_decode/ddtree_state.py
+
+# --- Change 0: DDTree proposal wiring (tree branch gated tree_width>1) ---
+COPY image-src/llm_base_proposer.py ${VLLM}/v1/spec_decode/llm_base_proposer.py
+COPY image-src/dflash.py            ${VLLM}/v1/spec_decode/dflash.py
+
+# Sanity: modules import at build time (fails the build early if broken).
+RUN /opt/venv/bin/python -c "import ast; ast.parse(open('${VLLM}/v1/spec_decode/ddtree.py').read()); ast.parse(open('${VLLM}/v1/spec_decode/ddtree_state.py').read()); ast.parse(open('${VLLM}/model_executor/layers/mamba/abstract.py').read()); print('AST_OK')"

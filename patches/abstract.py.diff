@@ -1,0 +1,48 @@
+--- a/vllm/model_executor/layers/mamba/abstract.py
++++ b/vllm/model_executor/layers/mamba/abstract.py
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++import os
+ from abc import abstractmethod
+ from collections.abc import Iterable
+ 
+@@ -12,6 +13,25 @@
+ from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+ 
+ 
++def _num_speculative_blocks(vllm_config: VllmConfig) -> int:
++    """Per-sequence extra GDN state-block reservation (INVARIANT 1).
++
++    Linear DFlash reserves num_speculative_tokens blocks. DDTree tree
++    verification needs one recurrent-state slot per tree node, so reserve the
++    tree node budget when it exceeds num_spec. Tree width/budget is taken from
++    env during development (DFLASH_NODE_BUDGET); when unset this is a strict
++    no-op (== num_speculative_tokens) so linear behavior is byte-identical.
++    """
++    if vllm_config.speculative_config is None:
++        return 0
++    num_spec = vllm_config.speculative_config.num_speculative_tokens or 0
++    try:
++        node_budget = int(os.environ.get("DFLASH_NODE_BUDGET", "0"))
++    except ValueError:
++        node_budget = 0
++    return max(num_spec, node_budget)
++
++
+ class MambaBase(AttentionLayerBase):
+     """
+     Base class for Mamba-like layers which support the v1 engine.
+@@ -51,11 +71,7 @@
+             page_size_padded=page_size_padded,
+             mamba_type=self.mamba_type,
+             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
+-            num_speculative_blocks=(
+-                vllm_config.speculative_config.num_speculative_tokens
+-                if vllm_config.speculative_config
+-                else 0
+-            ),
++            num_speculative_blocks=_num_speculative_blocks(vllm_config),
+         )
+ 
+     def get_attn_backend(self) -> type[AttentionBackend]:

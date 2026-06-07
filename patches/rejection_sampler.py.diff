@@ -1,0 +1,77 @@
+--- a/vllm/v1/sample/rejection_sampler.py
++++ b/vllm/v1/sample/rejection_sampler.py
+@@ -117,6 +117,13 @@
+         """
+         assert metadata.max_spec_len <= MAX_SPEC_LEN
+ 
++        # Change C: DDTree tree-aware acceptance (batch_size==1). Walk the tree
++        # from the root, at each node following the child whose token matches the
++        # target's greedy prediction after that node; emit the accepted path plus
++        # the bonus token. Same output contract as linear: [batch, max_spec_len+1].
++        if getattr(metadata, "tree_parent_index", None) is not None:
++            return self._tree_accept(metadata, logits)
++
+         bonus_logits_indices = metadata.bonus_logits_indices
+         target_logits_indices = metadata.target_logits_indices
+ 
+@@ -194,6 +201,60 @@
+             logprobs_tensors=logprobs_tensors,
+         )
+ 
++    def _tree_accept(
++        self,
++        metadata: SpecDecodeMetadata,
++        logits: torch.Tensor,
++    ) -> SamplerOutput:
++        """DDTree greedy tree acceptance (batch_size==1, temperature==0)."""
++        parent = metadata.tree_parent_index
++        tok_ids = metadata.tree_token_ids
++        B = len(parent)
++        # Flat query layout: pos i == tree node i (pos 0 == root/bonus_prev).
++        # target_tokens[p] = argmax(logits at flat pos p) = target greedy AFTER
++        # node p (given node p's ancestors via the verify mask). A child c of
++        # `current` is accepted iff its token == target_tokens[current].
++        target_tokens = logits[metadata.target_logits_indices].argmax(dim=-1)
++        nt = target_tokens.shape[0]
++        bonus_tok = int(logits[metadata.bonus_logits_indices[0]].argmax().item())
++        children: list[list[int]] = [[] for _ in range(B)]
++        for i in range(1, B):
++            children[parent[i]].append(i)
++        accepted: list[int] = []
++        current = 0
++        while current < nt:
++            pred = int(target_tokens[current].item())
++            match = None
++            for c in children[current]:
++                if tok_ids[c] == pred:
++                    match = c
++                    break
++            if match is None:
++                break
++            accepted.append(match)
++            current = match
++        # Bonus = target's greedy continuation after the accepted leaf.
++        bonus_out = int(target_tokens[current].item()) if current < nt else bonus_tok
++        max_len = metadata.max_spec_len + 1
++        out = torch.full((1, max_len), -1, dtype=torch.int32, device=logits.device)
++        for pos, node in enumerate(accepted):
++            out[0, pos] = tok_ids[node]
++        out[0, len(accepted)] = bonus_out
++        import os as _os
++        if _os.environ.get("DFLASH_DBG"):
++            n = getattr(RejectionSampler, "_dbg_round", 0)
++            if n < 6:
++                RejectionSampler._dbg_round = n + 1
++                _dti = metadata.draft_token_ids
++                _dti = _dti.tolist() if hasattr(_dti, "tolist") else list(_dti)
++                print(f"DBG_ACCEPT round={n} path_len={len(accepted)} bonus={bonus_out} B={B}\n"
++                      f"   tok_ids   ={tok_ids[:13]}\n"
++                      f"   draft_ids ={_dti[:13]}\n"
++                      f"   tgt_tokens={[int(x) for x in target_tokens[:8].tolist()]}\n"
++                      f"   nDraft={len(metadata.num_draft_tokens)} numDraft0={metadata.num_draft_tokens[0]}",
++                      flush=True)
++        return SamplerOutput(sampled_token_ids=out, logprobs_tensors=None)
++
+     def _get_logprobs_tensors(
+         self,
+         max_num_logprobs: int,

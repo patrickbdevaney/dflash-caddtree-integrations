@@ -1,0 +1,56 @@
+--- a/vllm/v1/spec_decode/llm_base_proposer.py
++++ b/vllm/v1/spec_decode/llm_base_proposer.py
+@@ -416,6 +416,12 @@
+     ) -> torch.Tensor:
+         batch_size = common_attn_metadata.batch_size()
+ 
++        # DDTree: reset per-round tree state (valid for exactly this round).
++        if getattr(self, "tree_width", 1) > 1:
++            self.current_tree = None
++            self.current_node_to_slot = None
++            self.current_context_lengths = None
++
+         if self.method in ("eagle3", "dflash"):
+             assert isinstance(
+                 self.model,
+@@ -475,6 +481,40 @@
+ 
+         # Early exit if there is only one draft token to be generated.
+         if self.num_speculative_tokens == 1 or self.parallel_drafting:
++            # DDTree (tree_width > 1): build a prefix-closed tree from the K
++            # per-position draft marginals and return its non-root nodes as the
++            # flat draft proposal. Batch_size==1 (current DFlash single-req mode).
++            if getattr(self, "tree_width", 1) > 1 and self.parallel_drafting:
++                from vllm.v1.spec_decode.ddtree import DDTreeHeap
++
++                logits = self.model.compute_logits(sample_hidden_states)
++                logits_tree = logits.view(
++                    batch_size, self.num_speculative_tokens, -1
++                )
++                heap = DDTreeHeap(
++                    budget=self.num_speculative_tokens,  # B-1 <= 12 fits scheduler
++                    tree_width=self.tree_width,
++                )
++                root_token = int(next_token_ids[0].item())
++                tree = heap.build(logits_tree[0], root_token)
++                self.current_tree = tree
++                # Context length is resolved in the runner (Change A) from its own
++                # num_computed_tokens; store seq_len here only as a fallback (D9).
++                try:
++                    self.current_context_lengths = [
++                        int(common_attn_metadata.seq_lens[0].item())
++                    ]
++                except Exception:
++                    self.current_context_lengths = None
++                flat_tokens = list(tree.token_ids[1:])  # drop root (= bonus token)
++                if len(flat_tokens) > self.num_speculative_tokens:
++                    flat_tokens = flat_tokens[: self.num_speculative_tokens]
++                flat_tokens = flat_tokens + [0] * (
++                    self.num_speculative_tokens - len(flat_tokens)
++                )
++                return torch.tensor(
++                    flat_tokens, dtype=torch.int32, device=self.device
++                ).view(batch_size, self.num_speculative_tokens)
+             draft_token_ids = self._greedy_sample(sample_hidden_states)
+             return draft_token_ids.view(-1, self.num_speculative_tokens)
+ 

@@ -1,0 +1,686 @@
+--- a/vllm/model_executor/layers/mamba/abstract.py
++++ b/vllm/model_executor/layers/mamba/abstract.py
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++import os
+ from abc import abstractmethod
+ from collections.abc import Iterable
+ 
+@@ -12,6 +13,25 @@
+ from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+ 
+ 
++def _num_speculative_blocks(vllm_config: VllmConfig) -> int:
++    """Per-sequence extra GDN state-block reservation (INVARIANT 1).
++
++    Linear DFlash reserves num_speculative_tokens blocks. DDTree tree
++    verification needs one recurrent-state slot per tree node, so reserve the
++    tree node budget when it exceeds num_spec. Tree width/budget is taken from
++    env during development (DFLASH_NODE_BUDGET); when unset this is a strict
++    no-op (== num_speculative_tokens) so linear behavior is byte-identical.
++    """
++    if vllm_config.speculative_config is None:
++        return 0
++    num_spec = vllm_config.speculative_config.num_speculative_tokens or 0
++    try:
++        node_budget = int(os.environ.get("DFLASH_NODE_BUDGET", "0"))
++    except ValueError:
++        node_budget = 0
++    return max(num_spec, node_budget)
++
++
+ class MambaBase(AttentionLayerBase):
+     """
+     Base class for Mamba-like layers which support the v1 engine.
+@@ -51,11 +71,7 @@
+             page_size_padded=page_size_padded,
+             mamba_type=self.mamba_type,
+             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
+-            num_speculative_blocks=(
+-                vllm_config.speculative_config.num_speculative_tokens
+-                if vllm_config.speculative_config
+-                else 0
+-            ),
++            num_speculative_blocks=_num_speculative_blocks(vllm_config),
+         )
+ 
+     def get_attn_backend(self) -> type[AttentionBackend]:
+--- a/vllm/v1/spec_decode/dflash.py
++++ b/vllm/v1/spec_decode/dflash.py
+@@ -74,6 +74,16 @@
+         # DFlash embeds mask tokens directly.
+         self.parallel_drafting_hidden_state_tensor = None
+ 
++        # DDTree tree-speculation state (one round's lifetime, reset in propose).
++        # tree_width from env during dev (config field wired later). W=1 = linear.
++        import os as _os
++        sc = vllm_config.speculative_config
++        cfg_w = getattr(sc, "tree_width", 1) if sc else 1
++        self.tree_width: int = int(_os.environ.get("DFLASH_TREE_WIDTH", cfg_w or 1))
++        self.current_tree = None
++        self.current_node_to_slot = None
++        self.current_context_lengths = None
++
+     @override
+     def allow_multiple_draft_kv_cache_groups(self) -> bool:
+         return True
+--- a/vllm/v1/attention/backends/gdn_attn.py
++++ b/vllm/v1/attention/backends/gdn_attn.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Backend for GatedDeltaNet attention."""
+ 
++import os
+ from dataclasses import dataclass
+ 
+ import torch
+@@ -63,6 +64,19 @@
+ 
+     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
+ 
++    # DDTree tree-verification schedule (None in linear mode). Per BFS depth
++    # level d>=1: flat positions into the spec-token dim, the node's pool slot,
++    # and its parent's pool slot. Used by the GDN per-node depth-batched
++    # recurrence (each node seeds from its parent slot, writes its own slot).
++    tree_mode: bool = False
++    tree_num_nodes: int = 0  # number of non-root nodes (B-1)
++    tree_flat_pos: list | None = None        # list[Tensor]  per depth
++    tree_node_slots: list | None = None      # list[Tensor]  per depth
++    tree_parent_slots: list | None = None    # list[Tensor]  per depth
++    tree_parent_index: list | None = None    # [B] node parent indices (-1 root);
++    #                                          read by the full-attn layer to build
++    #                                          the ancestor mask (D11 split-attn).
++
+     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
+     chunk_indices: torch.Tensor | None = None
+     chunk_offsets: torch.Tensor | None = None
+@@ -99,6 +113,21 @@
+         self.use_spec_decode: bool = self.num_spec > 0
+         self._init_reorder_batch_threshold(1, self.use_spec_decode)
+ 
++        # DDTree tree-speculation config. During development W/budget come from
++        # env (config fields wired later). tree_mode False -> exact linear path.
++        # tree_node_budget B: one GDN state slot per tree node + 1 canonical.
++        sc = self.speculative_config
++        cfg_width = getattr(sc, "tree_width", 1) if sc else 1
++        cfg_budget = getattr(sc, "tree_node_budget", 0) if sc else 0
++        self.tree_width: int = int(os.environ.get("DFLASH_TREE_WIDTH", cfg_width or 1))
++        env_budget = int(os.environ.get("DFLASH_NODE_BUDGET", "0"))
++        self.node_budget: int = max(env_budget, cfg_budget or 0, self.num_spec)
++        self.tree_mode: bool = self.use_spec_decode and self.tree_width > 1
++        # spec index columns: B+1 in tree mode, else num_spec+1 (byte-identical).
++        self._spec_width: int = (
++            self.node_budget + 1 if self.tree_mode else self.num_spec + 1
++        )
++
+         self.use_full_cuda_graph: bool = (
+             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+         )
+@@ -113,7 +142,7 @@
+             )
+ 
+         self.spec_state_indices_tensor: torch.Tensor = torch.empty(
+-            (self.decode_cudagraph_max_bs, self.num_spec + 1),
++            (self.decode_cudagraph_max_bs, self._spec_width),
+             dtype=torch.int32,
+             device=device,
+         )
+@@ -424,6 +453,68 @@
+             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
+             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
+ 
++        # --- D10: DDTree per-node depth-batched GDN schedule (tree mode only) ---
++        tree_mode = False
++        tree_num_nodes = 0
++        tree_flat_pos = None
++        tree_node_slots = None
++        tree_parent_slots = None
++        drafter = getattr(self, "drafter", None)
++        cur_tree = getattr(drafter, "current_tree", None) if drafter else None
++        if (
++            self.tree_mode
++            and cur_tree is not None
++            and num_spec_decodes > 0
++            and spec_state_indices_tensor is not None
++        ):
++            dev = spec_state_indices_tensor.device
++            row0 = spec_state_indices_tensor[0]
++            ncols = row0.shape[0]
++            ssize = min(cur_tree.size, ncols)
++            # Canonical (prior accepted) state lives at slot[num_accepted-1]
++            # (same convention as linear DFlash). Root maps there; the other
++            # nodes take the remaining slots. Promotion writes the accepted
++            # leaf back to slot[num_accepted-1] so the existing align machinery
++            # carries it to the next round (handles buffer rotation for us).
++            ca = 0
++            if num_accepted_tokens is not None:
++                ca = int(num_accepted_tokens[0].item()) - 1
++            ca = max(0, min(ca, ncols - 1))
++            avail = [j for j in range(ncols) if j != ca]
++            node_to_slot = [0] * ssize
++            node_to_slot[0] = int(row0[ca].item())  # root = canonical
++            for k, node in enumerate(range(1, ssize)):
++                node_to_slot[node] = int(row0[avail[k]].item())
++            drafter.current_node_to_slot = node_to_slot
++            drafter.current_spec_slots = [int(x) for x in row0.tolist()]
++            # Group non-root nodes by BFS depth; flat position of node i is i-1.
++            from collections import defaultdict as _dd
++            by_depth = _dd(list)
++            for i in range(1, ssize):
++                by_depth[cur_tree.depth[i]].append(i)
++            tree_flat_pos, tree_node_slots, tree_parent_slots = [], [], []
++            for d in sorted(by_depth):
++                nodes_d = by_depth[d]
++                # Flat query pos i == tree node i (pos 0 == root/bonus_prev), so
++                # node i's q/k/v is gathered from flat position i.
++                tree_flat_pos.append(
++                    torch.tensor([i for i in nodes_d], dtype=torch.long, device=dev)
++                )
++                tree_node_slots.append(
++                    torch.tensor(
++                        [node_to_slot[i] for i in nodes_d],
++                        dtype=torch.int32, device=dev,
++                    )
++                )
++                tree_parent_slots.append(
++                    torch.tensor(
++                        [node_to_slot[cur_tree.parent_index[i]] for i in nodes_d],
++                        dtype=torch.int32, device=dev,
++                    )
++                )
++            tree_num_nodes = ssize - 1
++            tree_mode = True
++
+         attn_metadata = GDNAttentionMetadata(
+             num_prefills=num_prefills,
+             num_prefill_tokens=num_prefill_tokens,
+@@ -443,6 +534,12 @@
+             spec_token_indx=spec_token_indx,
+             non_spec_token_indx=non_spec_token_indx,
+             num_accepted_tokens=num_accepted_tokens,
++            tree_mode=tree_mode,
++            tree_num_nodes=tree_num_nodes,
++            tree_flat_pos=tree_flat_pos,
++            tree_node_slots=tree_node_slots,
++            tree_parent_slots=tree_parent_slots,
++            tree_parent_index=(list(cur_tree.parent_index) if tree_mode else None),
+             nums_dict=nums_dict,
+             batch_ptr=batch_ptr,
+             token_chunk_offset_ptr=token_chunk_offset_ptr,
+--- a/vllm/model_executor/layers/mamba/gdn_linear_attn.py
++++ b/vllm/model_executor/layers/mamba/gdn_linear_attn.py
+@@ -1251,7 +1251,50 @@
+         # 2. Recurrent attention
+ 
+         # 2.1: Process the multi-query part
+-        if spec_sequence_masks is not None:
++        if spec_sequence_masks is not None and getattr(
++            attn_metadata, "tree_mode", False
++        ):
++            # D10: DDTree per-node depth-batched recurrence. Each tree node seeds
++            # its recurrent state from its PARENT's slot (num_accepted=2 trick:
++            # ssm_state_indices=[node_slot, parent_slot], T=1 -> seed slot[1]=parent,
++            # write slot[0]=node). Nodes are batched per BFS depth so every parent
++            # is written before its children; canonical (root) slot is only read.
++            # A baseline non-in-place call gives the correctly-shaped output tensor
++            # (pool untouched); real-node outputs are then overwritten in tree order.
++            core_attn_out_spec, last_recurrent_state = (
++                fused_sigmoid_gating_delta_rule_update(
++                    A_log=self.A_log, a=a, b=b, dt_bias=self.dt_bias,
++                    q=query_spec, k=key_spec, v=value_spec,
++                    initial_state=ssm_state, inplace_final_state=False,
++                    cu_seqlens=spec_query_start_loc[
++                        : attn_metadata.num_spec_decodes + 1
++                    ],
++                    ssm_state_indices=spec_state_indices_tensor,
++                    num_accepted_tokens=num_accepted_tokens,
++                    use_qk_l2norm_in_kernel=True,
++                )
++            )
++            for d in range(len(attn_metadata.tree_flat_pos)):
++                fp = attn_metadata.tree_flat_pos[d]
++                ns = attn_metadata.tree_node_slots[d]
++                ps = attn_metadata.tree_parent_slots[d]
++                n = fp.shape[0]
++                ssi_d = torch.stack([ns, ps], dim=1).contiguous()
++                nat_d = torch.full((n,), 2, dtype=torch.int32, device=fp.device)
++                cu_d = torch.arange(n + 1, dtype=torch.int32, device=fp.device)
++                out_d, _ = fused_sigmoid_gating_delta_rule_update(
++                    A_log=self.A_log,
++                    a=a[fp].contiguous(), b=b[fp].contiguous(),
++                    dt_bias=self.dt_bias,
++                    q=query_spec[:, fp].contiguous(),
++                    k=key_spec[:, fp].contiguous(),
++                    v=value_spec[:, fp].contiguous(),
++                    initial_state=ssm_state, inplace_final_state=True,
++                    cu_seqlens=cu_d, ssm_state_indices=ssi_d,
++                    num_accepted_tokens=nat_d, use_qk_l2norm_in_kernel=True,
++                )
++                core_attn_out_spec[:, fp] = out_d
++        elif spec_sequence_masks is not None:
+             core_attn_out_spec, last_recurrent_state = (
+                 fused_sigmoid_gating_delta_rule_update(
+                     A_log=self.A_log,
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -396,6 +396,28 @@
+     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+ 
+ 
++def _find_accepted_leaf(tree, path_tokens, node_to_slot):
++    """Walk the DDTree following accepted path tokens; return the leaf node's
++    pool slot, or None if no path node was accepted (only the bonus)."""
++    n = len(tree.parent_index)
++    children: list[list[int]] = [[] for _ in range(n)]
++    for i in range(1, n):
++        children[tree.parent_index[i]].append(i)
++    current = 0
++    for tok in path_tokens:
++        nxt = None
++        for c in children[current]:
++            if tree.token_ids[c] == tok:
++                nxt = c
++                break
++        if nxt is None:
++            break
++        current = nxt
++    if current == 0 or current >= len(node_to_slot):
++        return None
++    return node_to_slot[current]
++
++
+ class GPUModelRunner(
+     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
+ ):
+@@ -974,6 +996,24 @@
+             )
+         return self._mamba_copy_bufs
+ 
++    def _get_gdn_state_pool(self):
++        """Return the shared GDN ssm_state pool (kv_cache[1]) of the first GDN
++        layer, for DDTree branch-state promotion. Cached after first lookup."""
++        pool = getattr(self, "_gdn_state_pool", None)
++        if pool is not None:
++            return pool
++        for module in self.model.modules():
++            mt = getattr(module, "mamba_type", None)
++            kvc = getattr(module, "kv_cache", None)
++            if mt and "gdn" in str(mt).lower() and kvc is not None:
++                try:
++                    self._gdn_state_pool = kvc[1]
++                    return self._gdn_state_pool
++                except Exception:
++                    continue
++        self._gdn_state_pool = None
++        return None
++
+     def _init_model_kwargs(self):
+         model_kwargs = dict[str, Any]()
+ 
+@@ -1469,6 +1509,27 @@
+         num_reqs = output_token_ids.size(0)
+         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
+ 
++        # Change D: DDTree GDN branch-state promotion (batch_size==1). Copy the
++        # accepted leaf's recurrent state into slot[num_accepted-1] -- exactly
++        # where linear DFlash keeps its accepted state -- so the existing
++        # align-mode postprocess_mamba carries it to the next round (and handles
++        # buffer rotation). Must run BEFORE postprocess_mamba below.
++        _drafter = getattr(self, "drafter", None)
++        _tree = getattr(_drafter, "current_tree", None) if _drafter else None
++        if _tree is not None and getattr(_drafter, "current_node_to_slot", None):
++            from vllm.v1.spec_decode.ddtree_state import promote_branch
++            acc = int((output_token_ids[0] != -1).sum().item())
++            path_tokens = output_token_ids[0][: max(0, acc - 1)].tolist()
++            leaf_slot = _find_accepted_leaf(
++                _tree, path_tokens, _drafter.current_node_to_slot
++            )
++            spec_slots = getattr(_drafter, "current_spec_slots", None)
++            if leaf_slot is not None and spec_slots is not None:
++                dest = spec_slots[min(acc - 1, len(spec_slots) - 1)]
++                pool = self._get_gdn_state_pool()
++                if pool is not None and dest != leaf_slot:
++                    promote_branch(pool, dest, leaf_slot)
++
+         if self.cache_config.mamba_cache_mode == "align":
+             for i, num_tokens in enumerate(
+                 self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+@@ -2039,6 +2100,24 @@
+             self.positions[:total_num_scheduled_tokens],
+         )
+ 
++        # Change A: tree RoPE positions. KV slot mapping above used SEQUENTIAL
++        # positions (so each tree node gets a distinct KV slot). For RoPE,
++        # overwrite with DEPTH-based positions (sibling nodes at the same tree
++        # depth share a position), so positional encoding reflects tree depth.
++        # batch_size==1 spec-decode mode.
++        _drafter = getattr(self, "drafter", None)
++        _tree = getattr(_drafter, "current_tree", None) if _drafter else None
++        if _tree is not None:
++            _ctx = int(self.num_computed_tokens[0])
++            _depths = _tree.depth  # flat query pos i == node i; depth[0]=0 (root)
++            _npos = min(total_num_scheduled_tokens, len(_depths))
++            if _npos > 0:
++                _pos = torch.tensor(
++                    [_ctx + _depths[j] - 1 for j in range(_npos)],
++                    dtype=self.positions.dtype, device=self.positions.device,
++                )
++                self.positions[:_npos] = _pos
++
+         # Copy the tensors to the GPU.
+         self._prepare_input_ids(
+             scheduler_output,
+@@ -2101,6 +2180,16 @@
+             spec_decode_metadata = self._calc_spec_decode_metadata(
+                 num_draft_tokens, cu_num_tokens
+             )
++            # Change B: attach the current DDTree structure so the rejection
++            # sampler can walk the tree for acceptance (batch_size==1 mode).
++            _drafter = getattr(self, "drafter", None)
++            _tree = getattr(_drafter, "current_tree", None) if _drafter else None
++            if _tree is not None:
++                spec_decode_metadata.tree_parent_index = _tree.parent_index
++                spec_decode_metadata.tree_token_ids = _tree.token_ids
++            else:
++                spec_decode_metadata.tree_parent_index = None
++                spec_decode_metadata.tree_token_ids = None
+             logits_indices = spec_decode_metadata.logits_indices
+             num_sampled_tokens = num_draft_tokens + 1
+             # For DECODE only cuda graph of some attention backends (e.g., GDN).
+@@ -6451,6 +6540,18 @@
+                     if not self.parallel_config.use_ubatching
+                     else self.parallel_config.num_ubatches,
+                 )
++        # D2: give the GDN metadata builder a reference to the drafter so build()
++        # can read the current DDTree (tree-mode branch routing) and stash
++        # node_to_slot for acceptance/promotion.
++        if getattr(self, "drafter", None) is not None:
++            for _groups in self.attn_groups:
++                for _ag in _groups:
++                    try:
++                        _b = _ag.get_metadata_builder()
++                    except Exception:
++                        continue
++                    if isinstance(_b, GDNAttentionMetadataBuilder):
++                        _b.drafter = self.drafter
+         # Calculate reorder batch threshold (if needed)
+         # Note (tdoublep): do this *after* constructing builders,
+         # because some of them change the threshold at init time.
+--- a/vllm/v1/spec_decode/llm_base_proposer.py
++++ b/vllm/v1/spec_decode/llm_base_proposer.py
+@@ -416,6 +416,12 @@
+     ) -> torch.Tensor:
+         batch_size = common_attn_metadata.batch_size()
+ 
++        # DDTree: reset per-round tree state (valid for exactly this round).
++        if getattr(self, "tree_width", 1) > 1:
++            self.current_tree = None
++            self.current_node_to_slot = None
++            self.current_context_lengths = None
++
+         if self.method in ("eagle3", "dflash"):
+             assert isinstance(
+                 self.model,
+@@ -475,6 +481,40 @@
+ 
+         # Early exit if there is only one draft token to be generated.
+         if self.num_speculative_tokens == 1 or self.parallel_drafting:
++            # DDTree (tree_width > 1): build a prefix-closed tree from the K
++            # per-position draft marginals and return its non-root nodes as the
++            # flat draft proposal. Batch_size==1 (current DFlash single-req mode).
++            if getattr(self, "tree_width", 1) > 1 and self.parallel_drafting:
++                from vllm.v1.spec_decode.ddtree import DDTreeHeap
++
++                logits = self.model.compute_logits(sample_hidden_states)
++                logits_tree = logits.view(
++                    batch_size, self.num_speculative_tokens, -1
++                )
++                heap = DDTreeHeap(
++                    budget=self.num_speculative_tokens,  # B-1 <= 12 fits scheduler
++                    tree_width=self.tree_width,
++                )
++                root_token = int(next_token_ids[0].item())
++                tree = heap.build(logits_tree[0], root_token)
++                self.current_tree = tree
++                # Context length is resolved in the runner (Change A) from its own
++                # num_computed_tokens; store seq_len here only as a fallback (D9).
++                try:
++                    self.current_context_lengths = [
++                        int(common_attn_metadata.seq_lens[0].item())
++                    ]
++                except Exception:
++                    self.current_context_lengths = None
++                flat_tokens = list(tree.token_ids[1:])  # drop root (= bonus token)
++                if len(flat_tokens) > self.num_speculative_tokens:
++                    flat_tokens = flat_tokens[: self.num_speculative_tokens]
++                flat_tokens = flat_tokens + [0] * (
++                    self.num_speculative_tokens - len(flat_tokens)
++                )
++                return torch.tensor(
++                    flat_tokens, dtype=torch.int32, device=self.device
++                ).view(batch_size, self.num_speculative_tokens)
+             draft_token_ids = self._greedy_sample(sample_hidden_states)
+             return draft_token_ids.view(-1, self.num_speculative_tokens)
+ 
+--- a/vllm/model_executor/models/qwen3_next.py
++++ b/vllm/model_executor/models/qwen3_next.py
+@@ -6,8 +6,11 @@
+ from itertools import islice
+ 
+ import torch
++import torch.nn.functional as F
+ from torch import nn
+ 
++from vllm.forward_context import get_forward_context as _get_forward_context
++
+ from vllm._aiter_ops import rocm_aiter_ops
+ from vllm.compilation.decorators import support_torch_compile
+ from vllm.config import (
+@@ -202,6 +205,23 @@
+         return final_hidden_states.view(orig_shape)
+ 
+ 
++def _tree_attn_meta():
++    """Return a GDNAttentionMetadata in tree mode for the current forward, or
++    None. The full-attn layers read the tree structure (parent_index) from it to
++    build the DDTree ancestor mask (D11 split/eager attention)."""
++    try:
++        fc = _get_forward_context()
++        am = fc.attn_metadata
++        if not isinstance(am, dict):
++            return None
++        for m in am.values():
++            if getattr(m, "tree_mode", False) and getattr(m, "tree_parent_index", None):
++                return m
++    except Exception:
++        return None
++    return None
++
++
+ class Qwen3NextAttention(nn.Module):
+     def __init__(
+         self,
+@@ -312,12 +332,105 @@
+ 
+         attn_output = self.attn(q, k, v)
+ 
++        # D11: DDTree tree verification. self.attn above wrote the spec K/V to the
++        # paged cache (side effect we keep) but its causal-over-flat output is wrong
++        # for a tree. Recompute the spec tokens' attention with a single eager
++        # combined-mask SDPA: each spec node attends to ALL context + its tree
++        # ancestors. Gated on tree mode; linear path is byte-identical.
++        _tm = _tree_attn_meta()
++        if _tm is not None and q.shape[0] <= (_tm.tree_num_nodes + 2):
++            _eager = self._tree_eager_attn(q, k, v, _tm)
++            if _eager is not None:
++                attn_output = _eager
++
+         if self.attn_output_gate:
+             gate = torch.sigmoid(gate)
+             attn_output = attn_output * gate
+ 
+         output[:], _ = self.o_proj(attn_output)
+ 
++    def _tree_eager_attn(self, q, k, v, tm):
++        """Eager combined-mask attention for DDTree verification (D11).
++        Each spec query node attends to ALL context (gathered from the paged KV
++        cache) plus its tree ancestors. Single SDPA, GQA-aware. Returns the
++        attn output [nq, num_heads*head_dim], or None to fall back to self.attn.
++        """
++        try:
++            fc = _get_forward_context()
++            am = fc.attn_metadata[self.attn.layer_name]
++            seq_len = int(am.seq_lens[0].item())
++            bt = getattr(am, "block_table_tensor", None)
++            if bt is None:
++                bt = getattr(am, "block_table", None)
++            if bt is None:
++                return None
++            nq = q.shape[0]
++            ctx_len = seq_len - nq
++            if ctx_len < 0:
++                return None
++            H, Hkv, D = self.num_heads, self.num_kv_heads, self.head_dim
++            kv_cache = self.attn.kv_cache  # [2, num_blocks, block_size, Hkv, D]
++            if not hasattr(kv_cache, "shape") or kv_cache.numel() == 0:
++                return None
++            key_cache, val_cache = kv_cache[0], kv_cache[1]
++            bs = key_cache.shape[1]
++            dev = q.device
++
++            Q = q.view(nq, H, D)
++            spec_k = k.view(nq, Hkv, D)
++            spec_v = v.view(nq, Hkv, D)
++            if ctx_len > 0:
++                idx = torch.arange(ctx_len, device=dev)
++                blk = bt[0, (idx // bs)].long()
++                off = (idx % bs).long()
++                ctx_k = key_cache[blk, off].to(Q.dtype)  # [ctx_len, Hkv, D]
++                ctx_v = val_cache[blk, off].to(Q.dtype)
++                K = torch.cat([ctx_k, spec_k], dim=0)
++                V = torch.cat([ctx_v, spec_v], dim=0)
++            else:
++                K, V = spec_k, spec_v
++            L = K.shape[0]
++
++            # Ancestor mask over the spec region: flat pos i -> node i+1.
++            parent = tm.tree_parent_index
++            B = len(parent)
++            # Flat query pos i == tree node i (pos 0 == root). Node i attends to
++            # its ancestors (and itself); padding positions (>= B) attend to self.
++            anc = torch.zeros(nq, nq, dtype=torch.bool, device=dev)
++            for i in range(nq):
++                if i >= B:  # padding token: self-only
++                    anc[i, i] = True
++                    continue
++                j = i
++                while j != -1:
++                    if 0 <= j < nq:
++                        anc[i, j] = True
++                    j = parent[j]
++            mask = torch.zeros(nq, L, dtype=torch.bool, device=dev)
++            if ctx_len > 0:
++                mask[:, :ctx_len] = True
++            mask[:, ctx_len:] = anc
++
++            Qs = Q.permute(1, 0, 2).unsqueeze(0)   # [1, H, nq, D]
++            Ks = K.permute(1, 0, 2).unsqueeze(0)   # [1, Hkv, L, D]
++            Vs = V.permute(1, 0, 2).unsqueeze(0)
++            out = F.scaled_dot_product_attention(
++                Qs, Ks, Vs, attn_mask=mask.view(1, 1, nq, L),
++                scale=self.scaling, enable_gqa=True,
++            )
++            import os as _os
++            if _os.environ.get("DFLASH_DBG") and not getattr(Qwen3NextAttention, "_dbg_ok", False):
++                Qwen3NextAttention._dbg_ok = True
++                print(f"DBG_EAGER_OK nq={nq} ctx_len={ctx_len} L={L} H={H} Hkv={Hkv} D={D}", flush=True)
++            return out.squeeze(0).permute(1, 0, 2).reshape(nq, H * D)
++        except Exception as _e:
++            import os as _os
++            if _os.environ.get("DFLASH_DBG") and not getattr(Qwen3NextAttention, "_dbg_err", False):
++                Qwen3NextAttention._dbg_err = True
++                import traceback as _tb
++                print("DBG_EAGER_FAIL", repr(_e), flush=True); _tb.print_exc()
++            return None
++
+ 
+ class Qwen3NextDecoderLayer(nn.Module):
+     def __init__(
+--- a/vllm/v1/sample/rejection_sampler.py
++++ b/vllm/v1/sample/rejection_sampler.py
+@@ -117,6 +117,13 @@
+         """
+         assert metadata.max_spec_len <= MAX_SPEC_LEN
+ 
++        # Change C: DDTree tree-aware acceptance (batch_size==1). Walk the tree
++        # from the root, at each node following the child whose token matches the
++        # target's greedy prediction after that node; emit the accepted path plus
++        # the bonus token. Same output contract as linear: [batch, max_spec_len+1].
++        if getattr(metadata, "tree_parent_index", None) is not None:
++            return self._tree_accept(metadata, logits)
++
+         bonus_logits_indices = metadata.bonus_logits_indices
+         target_logits_indices = metadata.target_logits_indices
+ 
+@@ -194,6 +201,60 @@
+             logprobs_tensors=logprobs_tensors,
+         )
+ 
++    def _tree_accept(
++        self,
++        metadata: SpecDecodeMetadata,
++        logits: torch.Tensor,
++    ) -> SamplerOutput:
++        """DDTree greedy tree acceptance (batch_size==1, temperature==0)."""
++        parent = metadata.tree_parent_index
++        tok_ids = metadata.tree_token_ids
++        B = len(parent)
++        # Flat query layout: pos i == tree node i (pos 0 == root/bonus_prev).
++        # target_tokens[p] = argmax(logits at flat pos p) = target greedy AFTER
++        # node p (given node p's ancestors via the verify mask). A child c of
++        # `current` is accepted iff its token == target_tokens[current].
++        target_tokens = logits[metadata.target_logits_indices].argmax(dim=-1)
++        nt = target_tokens.shape[0]
++        bonus_tok = int(logits[metadata.bonus_logits_indices[0]].argmax().item())
++        children: list[list[int]] = [[] for _ in range(B)]
++        for i in range(1, B):
++            children[parent[i]].append(i)
++        accepted: list[int] = []
++        current = 0
++        while current < nt:
++            pred = int(target_tokens[current].item())
++            match = None
++            for c in children[current]:
++                if tok_ids[c] == pred:
++                    match = c
++                    break
++            if match is None:
++                break
++            accepted.append(match)
++            current = match
++        # Bonus = target's greedy continuation after the accepted leaf.
++        bonus_out = int(target_tokens[current].item()) if current < nt else bonus_tok
++        max_len = metadata.max_spec_len + 1
++        out = torch.full((1, max_len), -1, dtype=torch.int32, device=logits.device)
++        for pos, node in enumerate(accepted):
++            out[0, pos] = tok_ids[node]
++        out[0, len(accepted)] = bonus_out
++        import os as _os
++        if _os.environ.get("DFLASH_DBG"):
++            n = getattr(RejectionSampler, "_dbg_round", 0)
++            if n < 6:
++                RejectionSampler._dbg_round = n + 1
++                _dti = metadata.draft_token_ids
++                _dti = _dti.tolist() if hasattr(_dti, "tolist") else list(_dti)
++                print(f"DBG_ACCEPT round={n} path_len={len(accepted)} bonus={bonus_out} B={B}\n"
++                      f"   tok_ids   ={tok_ids[:13]}\n"
++                      f"   draft_ids ={_dti[:13]}\n"
++                      f"   tgt_tokens={[int(x) for x in target_tokens[:8].tolist()]}\n"
++                      f"   nDraft={len(metadata.num_draft_tokens)} numDraft0={metadata.num_draft_tokens[0]}",
++                      flush=True)
++        return SamplerOutput(sampled_token_ids=out, logprobs_tensors=None)
++
+     def _get_logprobs_tensors(
+         self,
+         max_num_logprobs: int,
