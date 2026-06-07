@@ -1,5 +1,16 @@
 # GDN prefix-caching + DFlash spec-decode — finding chain (newest first)
 
+## Gate-fix session — TIER-A CORRECTNESS REACHED (2026-06-07)
+
+Decoupled mamba_cache_mode from APC (2 config-path patches: models_config.py APC-off branch
+honors explicit align; config_vllm.py validator allows block_size with align). Found a 3rd
+coupling: align+spec WITHOUT APC asserts at runtime, and distinct prompts never hit the cache
+-- so the correct gate is run-twice WITHIN APC-on align (cold run1 populates, warm run2 hits).
+Result: **BYTE_IDENTICAL 20/20** -> the GDN prefix cache restores state bitwise-correctly in
+align mode. The P1 14/20 divergence was the benign align-vs-none MODE switch, now retired as a
+gate. CUDA graphs capture. Hit-rate/e2e on the real agentic trace still pending (no trace).
+See GDN_APC_GATE_FIX.md.
+
 ## Bugfix session — diagnosis: mode-switch, not a cache bug (2026-06-07)
 
 P1 divergence ROOT CAUSE: APC toggles the GDN compute MODE (vLLM forces 'none' w/o APC,
