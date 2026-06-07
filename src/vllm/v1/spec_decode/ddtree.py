@@ -59,6 +59,13 @@ def build_ddtree(
     """
     K = len(cand_token_ids)
     W = tree_width
+    # Optional spine-depth cap (DFLASH_SPINE_DEPTH): build the top-1 spine only
+    # to this depth, leaving the rest of node_budget for breadth. Lets us test
+    # B > spine_depth (real branches) without decoupling B from K via the
+    # scheduler -- set num_speculative_tokens=16 and cap spine at 12.
+    import os as _os
+    _sd = int(_os.environ.get("DFLASH_SPINE_DEPTH", "0") or 0)
+    spine_K = min(K, _sd) if _sd > 0 else K
     nodes: list[TreeNode] = [TreeNode(token_id=root_token, depth=0, parent=-1, cum_logp=0.0)]
 
     # --- 1. SPINE: the full-depth top-1 chain. This guarantees the linear
@@ -67,7 +74,7 @@ def build_ddtree(
     spine_idx = [0]  # node index at each depth (depth 0 = root)
     prev = 0
     cum = 0.0
-    for d in range(1, K + 1):
+    for d in range(1, spine_K + 1):
         if len(nodes) >= node_budget:
             break
         cum += cand_logps[d - 1][0]

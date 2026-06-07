@@ -203,6 +203,27 @@ adds little at a tight budget. Full analysis + correctness in
 
 ---
 
+## 7b. Does breadth beat linear? (B≫K investigation — answered: no)
+
+After overhead reduction, W=2 (56 tok/s) still trails linear (78) because at B=13
+the tree is the spine-only chain (= linear + overhead). The only way to win is
+τ_tree > τ_linear via real branches (B ≫ K). We probed this **before** the large
+scheduler rewrite (`benchmark_results/b-sweep-crossover.md`):
+
+- **τ-ceiling probe** (offline, real W=1 draft top-2 + target greedy): breadth's
+  headroom is **thin, +5–18%** (branch-catch rate 32%).
+- **Real B>K test** (num_spec=16, spine capped at 12, B=17, ~4 branches):
+  multi-branch verification is **correct** (accepted paths of 11–12 tokens
+  observed; ancestor mask + GDN routing verified), but at a **fixed budget,
+  depth beats breadth**: spine-16 (τ 5.82) > spine-12 + 4 branches (τ 4.26).
+
+**Conclusion:** for DFlash's strong draft (τ≈6), a deeper spine accepts more than
+a shallow spine + branches; breadth only helps on early spine errors (rare). The
+probe's modest headroom needs B ≫ K (full-depth spine + extra branch budget = the
+#42121-class scheduler rewrite) and is thin even then. **DDTree works correctly on
+GDN-hybrid MoE but does not beat strong-draft linear DFlash at feasible budgets;
+it pays off for weaker drafts or much larger budgets.**
+
 ## 8. Limitations / future work (to realize speedup)
 
 - **Fused multi-branch GDN kernel** (one parent-indexed launch) to remove the

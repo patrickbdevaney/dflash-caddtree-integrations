@@ -35,6 +35,10 @@ MAX_SPEC_LEN = 128
 
 
 _NSTEPS = {'n': 0}
+# Offline tau-ceiling probe (env DFLASH_PROBE): draft top-2 (set by the proposer)
+# and per-step records of (draft top-1, target greedy, bonus, top-2).
+_PROBE_TOP2 = {"v": None}
+_PROBE_RECORDS = []
 
 
 class RejectionSampler(nn.Module):
@@ -199,6 +203,17 @@ class RejectionSampler(nn.Module):
                 bonus_sampler_output.logprobs_tensors.logprobs,
                 output_token_ids,
             )
+
+        import os as _os
+        if _os.environ.get("DFLASH_PROBE") and _PROBE_TOP2["v"] is not None:
+            # Offline tau-ceiling probe: per draft position record target greedy,
+            # draft top-1, and draft top-2 (from the proposer).
+            tg = raw_target_logits.argmax(dim=-1).tolist()  # target greedy [K]
+            d1 = metadata.draft_token_ids.tolist()          # draft top-1 [K]
+            t2 = _PROBE_TOP2["v"]                            # draft top-2 [K][2]
+            bonus = int(bonus_token_ids[0].item()) if bonus_token_ids.numel() else -1
+            _PROBE_RECORDS.append({"tg": tg[:len(t2)], "d1": d1[:len(t2)],
+                                   "t2": t2, "bonus": bonus})
 
         return SamplerOutput(
             sampled_token_ids=output_token_ids,

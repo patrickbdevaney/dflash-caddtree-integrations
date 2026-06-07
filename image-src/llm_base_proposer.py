@@ -516,6 +516,14 @@ class SpecDecodeBaseProposer:
                     flat_tokens, dtype=torch.int32, device=self.device
                 ).view(batch_size, self.num_speculative_tokens)
             draft_token_ids = self._greedy_sample(sample_hidden_states)
+            import os as _os
+            if _os.environ.get("DFLASH_PROBE"):
+                # Capture draft top-2 per position for the offline tau-ceiling probe.
+                _lg = self.model.compute_logits(sample_hidden_states)
+                _t2 = _lg.view(-1, self.num_speculative_tokens, _lg.shape[-1]).topk(
+                    2, dim=-1).indices[0].tolist()  # [K][2]
+                import vllm.v1.sample.rejection_sampler as _rs
+                _rs._PROBE_TOP2["v"] = _t2
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.uses_mrope:

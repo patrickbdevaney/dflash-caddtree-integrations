@@ -528,7 +528,7 @@
          if self.method in ("eagle3", "dflash"):
              assert isinstance(
                  self.model,
-@@ -475,6 +481,40 @@
+@@ -475,7 +481,49 @@
  
          # Early exit if there is only one draft token to be generated.
          if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -567,8 +567,17 @@
 +                    flat_tokens, dtype=torch.int32, device=self.device
 +                ).view(batch_size, self.num_speculative_tokens)
              draft_token_ids = self._greedy_sample(sample_hidden_states)
++            import os as _os
++            if _os.environ.get("DFLASH_PROBE"):
++                # Capture draft top-2 per position for the offline tau-ceiling probe.
++                _lg = self.model.compute_logits(sample_hidden_states)
++                _t2 = _lg.view(-1, self.num_speculative_tokens, _lg.shape[-1]).topk(
++                    2, dim=-1).indices[0].tolist()  # [K][2]
++                import vllm.v1.sample.rejection_sampler as _rs
++                _rs._PROBE_TOP2["v"] = _t2
              return draft_token_ids.view(-1, self.num_speculative_tokens)
  
+         if self.uses_mrope:
 --- a/vllm/model_executor/models/qwen3_next.py
 +++ b/vllm/model_executor/models/qwen3_next.py
 @@ -6,8 +6,11 @@
@@ -787,17 +796,21 @@
      def __init__(
 --- a/vllm/v1/sample/rejection_sampler.py
 +++ b/vllm/v1/sample/rejection_sampler.py
-@@ -34,6 +34,9 @@
+@@ -34,6 +34,13 @@
  MAX_SPEC_LEN = 128
  
  
 +_NSTEPS = {'n': 0}
++# Offline tau-ceiling probe (env DFLASH_PROBE): draft top-2 (set by the proposer)
++# and per-step records of (draft top-1, target greedy, bonus, top-2).
++_PROBE_TOP2 = {"v": None}
++_PROBE_RECORDS = []
 +
 +
  class RejectionSampler(nn.Module):
      """
      The implementation strictly follows the algorithm described in
-@@ -116,6 +119,14 @@
+@@ -116,6 +123,14 @@
                  requested.
          """
          assert metadata.max_spec_len <= MAX_SPEC_LEN
@@ -812,7 +825,23 @@
  
          bonus_logits_indices = metadata.bonus_logits_indices
          target_logits_indices = metadata.target_logits_indices
-@@ -194,6 +205,60 @@
+@@ -189,11 +204,76 @@
+                 output_token_ids,
+             )
+ 
++        import os as _os
++        if _os.environ.get("DFLASH_PROBE") and _PROBE_TOP2["v"] is not None:
++            # Offline tau-ceiling probe: per draft position record target greedy,
++            # draft top-1, and draft top-2 (from the proposer).
++            tg = raw_target_logits.argmax(dim=-1).tolist()  # target greedy [K]
++            d1 = metadata.draft_token_ids.tolist()          # draft top-1 [K]
++            t2 = _PROBE_TOP2["v"]                            # draft top-2 [K][2]
++            bonus = int(bonus_token_ids[0].item()) if bonus_token_ids.numel() else -1
++            _PROBE_RECORDS.append({"tg": tg[:len(t2)], "d1": d1[:len(t2)],
++                                   "t2": t2, "bonus": bonus})
++
+         return SamplerOutput(
+             sampled_token_ids=output_token_ids,
              logprobs_tensors=logprobs_tensors,
          )
  
