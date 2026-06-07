@@ -1,5 +1,13 @@
 # GDN prefix-caching + DFlash spec-decode — finding chain (newest first)
 
+## P1 — RESULT: launches, but bitwise gate FAILS → STOP (2026-06-07)
+
+align+APC+spec **launches** (no #39809 crash, graphs capture). But T=0 APC-on vs off
+**diverges 14/20 prompts** (block-boundary positions). Cache dtype is already bf16 ("auto"),
+so NOT a dtype fix -> **wrong-state bug** on this pre-nightly-fix base (Bug 1 absent).
+Per directive P1c: STOPPED, do not ship divergent output. Tier-A NOT reached on the overlay
+base; needs the nightly #39809 .py port (future). Recovery point clean (config-only, gated).
+
 ## P0 — base-state investigation (2026-06-07)
 
 **Workflow reality:** our base is the prebuilt overlay image `vllm-dflash-thor:fa-native`
