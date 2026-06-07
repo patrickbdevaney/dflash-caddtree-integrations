@@ -11,11 +11,19 @@ cannot be naively shared across the branches of a verification tree. This repo
 implements and verifies the **GDN branch-state solution** that makes it possible,
 and documents the full build + debugging process end-to-end.
 
-> **Status (honest):** the algorithm is **implemented and verified correct**
-> (coherent output, multi-token tree acceptance τ>1, W=1 byte-identical to linear
-> DFlash). The **eager reference implementation is not yet faster** than linear
-> (2.7× slower in eager mode) — net throughput needs fused kernels + CUDA graphs,
-> documented under *Limitations / future work*. No speedup is claimed.
+> **Status (honest):** DDTree is **implemented and verified correct** on the
+> GDN-hybrid (coherent output, correct multi-branch acceptance, W=1 byte-identical,
+> 0 invariant violations). It was optimized **3.6×** (spine fix + GDN per-branch
+> fusion + CUDA graphs) but **does not beat strong-draft linear DFlash**: at the
+> feasible budget B=13 it is the spine-only chain (= linear + per-step overhead),
+> and larger budgets are depth-dominated (depth beats breadth for a strong draft).
+>
+> **The actual win came from elsewhere.** Probing at *production temperatures*
+> revealed that **linear DFlash + typical (Medusa-style) acceptance** gives
+> **+11% tok/s and +17% τ at T=0.3** (90.7 vs 82 tok/s, CUDA graphs),
+> byte-identical at T=0. The lever is the *acceptance criterion*, not the tree —
+> and it belongs on the lean linear path (the tree only adds overhead). See
+> `benchmark_results/staged-optimization-final.md`.
 
 ---
 

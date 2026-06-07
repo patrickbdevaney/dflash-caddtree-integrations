@@ -132,6 +132,16 @@ class RejectionSampler(nn.Module):
         if getattr(metadata, "tree_parent_index", None) is not None:
             return self._tree_accept(metadata, logits)
 
+        # Linear + typical acceptance (DFLASH_ACCEPT_EPS>0, batch==1): the lean
+        # linear path with Medusa-style relaxed acceptance -- high tau at T>0
+        # WITHOUT the tree's per-step overhead. This is the production-optimal
+        # config (typical acceptance is orthogonal to tree breadth).
+        import os as _osm
+        _eps_lin = float(_osm.environ.get("DFLASH_ACCEPT_EPS", "0") or 0)
+        if _eps_lin > 0 and metadata.draft_token_ids is not None and \
+                len(metadata.num_draft_tokens) == 1:
+            return self._chain_typical_accept(metadata, logits, _eps_lin)
+
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
 
@@ -220,6 +230,36 @@ class RejectionSampler(nn.Module):
             logprobs_tensors=logprobs_tensors,
         )
 
+    def _chain_typical_accept(
+        self,
+        metadata: SpecDecodeMetadata,
+        logits: torch.Tensor,
+        eps: float,
+    ) -> SamplerOutput:
+        """Linear chain typical acceptance (batch_size==1). Accept draft token i
+        iff its target prob >= eps; else stop and emit the target's greedy bonus.
+        Same output contract as the rejection sampler: [1, max_spec_len+1]."""
+        draft = metadata.draft_token_ids
+        draft = draft.tolist() if hasattr(draft, "tolist") else list(draft)
+        tl = logits[metadata.target_logits_indices]
+        tprob = torch.softmax(tl.float(), dim=-1)
+        nt = tl.shape[0]
+        bonus_tok = int(logits[metadata.bonus_logits_indices[0]].argmax().item())
+        accepted: list[int] = []
+        for i in range(min(nt, len(draft))):
+            if float(tprob[i, draft[i]].item()) >= eps:
+                accepted.append(int(draft[i]))
+            else:
+                break
+        cur = len(accepted)
+        bonus_out = int(tl[cur].argmax().item()) if cur < nt else bonus_tok
+        max_len = metadata.max_spec_len + 1
+        out = torch.full((1, max_len), -1, dtype=torch.int32, device=logits.device)
+        for pos, t in enumerate(accepted):
+            out[0, pos] = t
+        out[0, len(accepted)] = bonus_out
+        return SamplerOutput(sampled_token_ids=out, logprobs_tensors=None)
+
     def _tree_accept(
         self,
         metadata: SpecDecodeMetadata,
@@ -233,25 +273,57 @@ class RejectionSampler(nn.Module):
         # target_tokens[p] = argmax(logits at flat pos p) = target greedy AFTER
         # node p (given node p's ancestors via the verify mask). A child c of
         # `current` is accepted iff its token == target_tokens[current].
-        target_tokens = logits[metadata.target_logits_indices].argmax(dim=-1)
+        import os as _os
+        target_logits = logits[metadata.target_logits_indices]
+        target_tokens = target_logits.argmax(dim=-1)
         nt = target_tokens.shape[0]
         bonus_tok = int(logits[metadata.bonus_logits_indices[0]].argmax().item())
         children: list[list[int]] = [[] for _ in range(B)]
         for i in range(1, B):
             children[parent[i]].append(i)
+        # Stage 1: typical/threshold acceptance (DFLASH_ACCEPT_EPS>0). Accept the
+        # highest-target-prob child whose target prob >= eps (vs exact argmax at
+        # eps=0, which is byte-identical to greedy). Boosts tau at T>0 where the
+        # draft's alternatives carry real target mass. eps=0 -> unchanged.
+        _eps = float(_os.environ.get("DFLASH_ACCEPT_EPS", "0") or 0)
+        _tprob = None
+        if _eps > 0:
+            _tprob = torch.softmax(target_logits.float(), dim=-1)
         accepted: list[int] = []
         current = 0
         while current < nt:
-            pred = int(target_tokens[current].item())
             match = None
-            for c in children[current]:
-                if tok_ids[c] == pred:
-                    match = c
-                    break
+            if _eps > 0:
+                best_p = _eps
+                for c in children[current]:
+                    p = float(_tprob[current, tok_ids[c]].item())
+                    if p >= best_p:
+                        best_p = p
+                        match = c
+            else:
+                pred = int(target_tokens[current].item())
+                for c in children[current]:
+                    if tok_ids[c] == pred:
+                        match = c
+                        break
             if match is None:
                 break
             accepted.append(match)
             current = match
+        # Stage 0: within-config invariant -- the realized tree acceptance must be
+        # >= the pure top-1 spine acceptance (the spine is always in the tree).
+        if _eps == 0:
+            spine_acc = 0
+            cur = 0
+            while cur + 1 < B and parent[cur + 1] == cur and cur < nt:
+                if tok_ids[cur + 1] == int(target_tokens[cur].item()):
+                    spine_acc += 1
+                    cur += 1
+                else:
+                    break
+            if len(accepted) < spine_acc:
+                print(f"DBG_INVARIANT_VIOLATION realized={len(accepted)} "
+                      f"spine={spine_acc} B={B}", flush=True)
         # Bonus = target's greedy continuation after the accepted leaf.
         bonus_out = int(target_tokens[current].item()) if current < nt else bonus_tok
         max_len = metadata.max_spec_len + 1

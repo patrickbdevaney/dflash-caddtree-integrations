@@ -46,15 +46,18 @@ def build_llm(tree_width: int = 1, max_model_len: int = 4096, max_num_seqs: int 
     mask at W>1); None keeps the default (FLASH_ATTN) for the linear baseline.
     """
     os.environ["DFLASH_TREE_WIDTH"] = str(tree_width)
+    nspec = int(os.environ.get("DFLASH_NUM_SPEC", "12"))
     from vllm import LLM
     kw = dict(
         model="/model", tokenizer="/model",
         quantization="compressed-tensors", kv_cache_dtype="auto",
-        speculative_config={"method": "dflash", "num_speculative_tokens": 12, "model": "/drafter"},
+        speculative_config={"method": "dflash", "num_speculative_tokens": nspec, "model": "/drafter"},
         gpu_memory_utilization=0.78, max_model_len=max_model_len, max_num_seqs=max_num_seqs,
-        enforce_eager=True, trust_remote_code=True,
+        enforce_eager=(os.environ.get("DFLASH_GRAPHS") != "1"), trust_remote_code=True,
         hf_overrides={"architectures": ["Qwen3_5MoeForConditionalGeneration"]},
     )
+    if os.environ.get("DFLASH_GRAPHS") == "1":
+        kw["compilation_config"] = {"cudagraph_capture_sizes": [1, 13]}
     if attention_backend is not None:
         kw["attention_backend"] = attention_backend
     return LLM(**kw)
