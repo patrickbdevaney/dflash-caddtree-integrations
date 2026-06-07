@@ -1,5 +1,20 @@
 # No-train suite — running finding chain (newest first)
 
+## Stage F — NVFP4 verify-path audit: CLEAN (2026-06-07)
+
+Profiled verify pass (eager). FlashInferCutlassNvFp4LinearKernel for NVFP4 GEMM. Top CUDA:
+cutlass_fp4_group_mm (MoE expert FP4 GEMM) ~2.36M us = ~34% (DOMINANT), flashinfer_mm_fp4
+(attn) 84k, FP4 quant helpers. Dequant fallback = 3156 us (0.045%) -- a tiny bf16 type-convert,
+NOT a layer fallback. GDN state update is bf16 BY DESIGN (Triton fused kernel, precision-
+sensitive; not FP4-eligible). **Verdict: no silent dequant; all benchmarks valid; no fix
+needed.** Confirms MoE expert fetch/compute is the C_verify bottleneck -> Stage E (expert
+prefetch) targets the right term. Flag: GREEN. (profiles/thor/fp4_audit.json)
+
+## Stage D — draft top-p/k: MOOT (greedy draft) (2026-06-07)
+
+Like items 3/4/6: DFlash drafts the argmax (top-1), which is in ANY top-p/top-k set, so
+restricting the candidate set cannot change the proposed token. No lossless effect. Skipped.
+
 ## Item 7 — typical acceptance T=0 guard FIX (2026-06-07)
 
 Audit found typical acceptance ran softmax-threshold accept even at T=0 (no greedy guard).

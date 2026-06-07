@@ -1,0 +1,15 @@
+{
+  "device": "Jetson AGX Thor SM110a", "mode": "eager profile, 4 prompts x 48 tok",
+  "linear_kernel": "FlashInferCutlassNvFp4LinearKernel (NVFP4 GEMM)",
+  "total_cuda_us": 6993570,
+  "top_kernels_us": {
+    "cutlass_fp4_group_mm (MoE expert GEMM)": 2362878,
+    "flashinfer_mm_fp4 (attn/linear)": 83937,
+    "compute_expert_blockscale_offsets": 23482,
+    "scaled_fp4_quant + cvt_fp16_to_fp4 + experts_quant": 45802
+  },
+  "dequant_fallback_us": 3156,
+  "dequant_fallback_share": 0.00045,
+  "verdict": "FP4 throughout; NO silent dequant fallback. GDN state update is bf16 by design (not a fallback). MoE expert FP4 GEMM dominates (~34% of CUDA time) -> expert fetch/compute is the C_verify bottleneck (Stage E target).",
+  "fix_applied": "none needed"
+}
