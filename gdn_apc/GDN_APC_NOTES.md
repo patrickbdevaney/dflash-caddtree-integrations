@@ -1,5 +1,14 @@
 # GDN prefix-caching + DFlash spec-decode — finding chain (newest first)
 
+## Bugfix session — diagnosis: mode-switch, not a cache bug (2026-06-07)
+
+P1 divergence ROOT CAUSE: APC toggles the GDN compute MODE (vLLM forces 'none' w/o APC,
+'align' with APC). The gate "APC-on vs APC-off" = align vs none = two different FP recurrence
+paths -> greedy near-tie flips (16 vs 17), block-size-INVARIANT (64/128/2048 identical) ->
+Candidates A & B (cache/block bugs) BOTH ELIMINATED. The bitwise gate is confounded; the real
+check is cold==warm WITHIN align mode, which needs decoupling mode from the APC flag (next
+session). No fix shipped (no candidate confirmed). See GDN_APC_BUGFIX.md.
+
 ## P1 — RESULT: launches, but bitwise gate FAILS → STOP (2026-06-07)
 
 align+APC+spec **launches** (no #39809 crash, graphs capture). But T=0 APC-on vs off
