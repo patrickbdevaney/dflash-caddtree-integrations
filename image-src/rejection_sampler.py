@@ -138,7 +138,14 @@ class RejectionSampler(nn.Module):
         # config (typical acceptance is orthogonal to tree breadth).
         import os as _osm
         _eps_lin = float(_osm.environ.get("DFLASH_ACCEPT_EPS", "0") or 0)
-        if _eps_lin > 0 and metadata.draft_token_ids is not None and \
+        # T=0 GUARD (audit Item 7): typical acceptance is a T>0 relaxation; at greedy
+        # (T==0) it MUST reduce to exact greedy so output stays byte-identical. Only
+        # take the typical path when the batch is non-greedy.
+        _is_greedy_lin = (
+            sampling_metadata.temperature is None
+            or bool((sampling_metadata.temperature == GREEDY_TEMPERATURE).all())
+        )
+        if _eps_lin > 0 and not _is_greedy_lin and metadata.draft_token_ids is not None and \
                 len(metadata.num_draft_tokens) == 1:
             return self._chain_typical_accept(metadata, logits, _eps_lin)
 

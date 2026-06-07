@@ -1,5 +1,14 @@
 # No-train suite — running finding chain (newest first)
 
+## Item 7 — typical acceptance T=0 guard FIX (2026-06-07)
+
+Audit found typical acceptance ran softmax-threshold accept even at T=0 (no greedy guard).
+Added `_is_greedy_lin` guard in `rejection_sampler.forward`: typical path taken only when
+NOT greedy. GATE (CUDA graphs): T=0 eps=0.09 -> **BYTE_IDENTICAL** to baseline (20 prompts);
+T>0 typical still boosts (tau 3.81->4.62 @T0.3 +21%, 3.54->4.62 @T0.5 +31%). Item 7 moves
+YELLOW->GREEN (T=0 lossless gate now met). tok/s in-process is warmup-confounded; real tok/s
+deferred to the serve bench.
+
 ## Stage -1 / D0 — baseline + C_verify + decision gate (2026-06-07)
 
 **Baseline locked** (20-prompt mixed seed set, tag `linear-opt-baseline`, T=0 token IDs in
