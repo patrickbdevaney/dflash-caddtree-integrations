@@ -205,6 +205,64 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
+import os as _osmod
+import time as _time
+
+# DDTree profiling (env DFLASH_PROF). Cumulative seconds across the run.
+_ATPROF = {"attn_tree_s": 0.0, "n": 0}
+
+def _os_env(name):
+    return bool(_osmod.environ.get(name))
+
+
+_FLEX_FN = None
+
+
+def _get_flex():
+    global _FLEX_FN
+    if _FLEX_FN is None:
+        from torch.nn.attention.flex_attention import flex_attention
+        _FLEX_FN = torch.compile(flex_attention)
+    return _FLEX_FN
+
+
+def _flex_tree_attn(Q, K, V, anc, nq, ctx_len, L, H, Hkv, D, scale, dev):
+    """Change 1: FlexAttention over a power-of-2-padded spec batch. Q:[nq,H,D],
+    K/V:[L,Hkv,D] (L=ctx_len+nq), anc:[nq,nq] ancestor mask. Returns [nq,H*D]
+    or None on any error (caller falls back to eager SDPA)."""
+    try:
+        from torch.nn.attention.flex_attention import create_block_mask
+        PAD = 16
+        rep = H // Hkv
+        Kx = K.repeat_interleave(rep, dim=1)  # [L, H, D] (GQA -> MHA)
+        Vx = V.repeat_interleave(rep, dim=1)
+        kvpad = 1 << max(4, (L - 1).bit_length())  # next pow2 >= L (>=16)
+        Qp = Q.new_zeros(PAD, H, D); Qp[:nq] = Q
+        Kp = Kx.new_zeros(kvpad, H, D); Kp[:L] = Kx
+        Vp = Vx.new_zeros(kvpad, H, D); Vp[:L] = Vx
+        fmask = torch.zeros(PAD, kvpad, dtype=torch.bool, device=dev)
+        if ctx_len > 0:
+            fmask[:nq, :ctx_len] = True
+        fmask[:nq, ctx_len:ctx_len + nq] = anc
+
+        def _mm(b, h, qi, kvi):
+            return fmask[qi, kvi]
+
+        bm = create_block_mask(_mm, B=None, H=None, Q_LEN=PAD, KV_LEN=kvpad,
+                               device=dev)
+        out = _get_flex()(
+            Qp.permute(1, 0, 2).unsqueeze(0),
+            Kp.permute(1, 0, 2).unsqueeze(0),
+            Vp.permute(1, 0, 2).unsqueeze(0),
+            block_mask=bm, scale=scale,
+        )
+        return out.squeeze(0).permute(1, 0, 2)[:nq].reshape(nq, H * D)
+    except Exception as _e:
+        if _os_env("DFLASH_DBG"):
+            print("DBG_FLEX_FAIL", repr(_e), flush=True)
+        return None
+
+
 def _tree_attn_meta():
     """Return a GDNAttentionMetadata in tree mode for the current forward, or
     None. The full-attn layers read the tree structure (parent_index) from it to
@@ -339,9 +397,16 @@ class Qwen3NextAttention(nn.Module):
         # ancestors. Gated on tree mode; linear path is byte-identical.
         _tm = _tree_attn_meta()
         if _tm is not None and q.shape[0] <= (_tm.tree_num_nodes + 2):
+            _prof = _os_env("DFLASH_PROF")
+            if _prof:
+                torch.cuda.synchronize(); _a0 = _time.perf_counter()
             _eager = self._tree_eager_attn(q, k, v, _tm)
             if _eager is not None:
                 attn_output = _eager
+            if _prof:
+                torch.cuda.synchronize()
+                _ATPROF["attn_tree_s"] += _time.perf_counter() - _a0
+                _ATPROF["n"] += 1
 
         if self.attn_output_gate:
             gate = torch.sigmoid(gate)
@@ -414,10 +479,17 @@ class Qwen3NextAttention(nn.Module):
             Qs = Q.permute(1, 0, 2).unsqueeze(0)   # [1, H, nq, D]
             Ks = K.permute(1, 0, 2).unsqueeze(0)   # [1, Hkv, L, D]
             Vs = V.permute(1, 0, 2).unsqueeze(0)
-            out = F.scaled_dot_product_attention(
-                Qs, Ks, Vs, attn_mask=mask.view(1, 1, nq, L),
-                scale=self.scaling, enable_gqa=True,
-            )
+            out = None
+            if _os_env("DFLASH_FLEX"):
+                # Change 1: fused FlexAttention over padded (power-of-2) spec
+                # batch instead of eager SDPA. Falls back to SDPA on any error.
+                out = _flex_tree_attn(Q, K, V, anc, nq, ctx_len, L, H, Hkv, D,
+                                      self.scaling, dev)
+            if out is None:
+                out = F.scaled_dot_product_attention(
+                    Qs, Ks, Vs, attn_mask=mask.view(1, 1, nq, L),
+                    scale=self.scaling, enable_gqa=True,
+                )
             import os as _os
             if _os.environ.get("DFLASH_DBG") and not getattr(Qwen3NextAttention, "_dbg_ok", False):
                 Qwen3NextAttention._dbg_ok = True

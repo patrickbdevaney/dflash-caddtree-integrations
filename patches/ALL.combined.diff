@@ -75,7 +75,7 @@
  from dataclasses import dataclass
  
  import torch
-@@ -63,6 +64,19 @@
+@@ -63,6 +64,25 @@
  
      num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
  
@@ -88,6 +88,12 @@
 +    tree_flat_pos: list | None = None        # list[Tensor]  per depth
 +    tree_node_slots: list | None = None      # list[Tensor]  per depth
 +    tree_parent_slots: list | None = None    # list[Tensor]  per depth
++    # Single-launch per-branch fusion (Directive 1): one batched varlen call.
++    tree_branch_gather: torch.Tensor | None = None   # [T] flat positions, branch order
++    tree_branch_cu: torch.Tensor | None = None       # [N+1] cu_seqlens
++    tree_branch_ssi: torch.Tensor | None = None       # [N, maxlen] per-branch slots
++    tree_branch_seed: list | None = None              # [N] root slots to seed canonical
++    tree_branch_scatter: torch.Tensor | None = None   # [B-1] node -> branch-out pos
 +    tree_parent_index: list | None = None    # [B] node parent indices (-1 root);
 +    #                                          read by the full-attn layer to build
 +    #                                          the ancestor mask (D11 split-attn).
@@ -95,7 +101,7 @@
      # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
      chunk_indices: torch.Tensor | None = None
      chunk_offsets: torch.Tensor | None = None
-@@ -99,6 +113,21 @@
+@@ -99,6 +119,21 @@
          self.use_spec_decode: bool = self.num_spec > 0
          self._init_reorder_batch_threshold(1, self.use_spec_decode)
  
@@ -117,7 +123,7 @@
          self.use_full_cuda_graph: bool = (
              self.compilation_config.cudagraph_mode.has_full_cudagraphs()
          )
-@@ -113,7 +142,7 @@
+@@ -113,7 +148,7 @@
              )
  
          self.spec_state_indices_tensor: torch.Tensor = torch.empty(
@@ -126,7 +132,7 @@
              dtype=torch.int32,
              device=device,
          )
-@@ -424,6 +453,68 @@
+@@ -424,6 +459,110 @@
              non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
              non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
  
@@ -136,6 +142,11 @@
 +        tree_flat_pos = None
 +        tree_node_slots = None
 +        tree_parent_slots = None
++        tree_branch_gather = None
++        tree_branch_cu = None
++        tree_branch_ssi = None
++        tree_branch_seed = None
++        tree_branch_scatter = None
 +        drafter = getattr(self, "drafter", None)
 +        cur_tree = getattr(drafter, "current_tree", None) if drafter else None
 +        if (
@@ -192,10 +203,47 @@
 +            tree_num_nodes = ssize - 1
 +            tree_mode = True
 +
++            # --- Directive 1: single-launch per-branch fusion. Each root->leaf
++            # path becomes one varlen sequence seeded from a canonical copy, so
++            # the GDN recurrence is ONE batched kernel call instead of the
++            # per-depth Python loop. Needs per-branch disjoint slots; used only
++            # when they fit the reservation (else fall back to the depth loop). ---
++            bp = [p for p in cur_tree.branch_paths if len(p) > 1]
++            total = sum(len(p) - 1 for p in bp)
++            if bp and total <= len(avail):
++                gather: list[int] = []
++                cu = [0]
++                seed_slots: list[int] = []
++                node_first_pos: dict[int, int] = {}
++                maxlen = max(len(p) - 1 for p in bp)
++                ssi_b = torch.zeros(len(bp), maxlen, dtype=torch.int32, device=dev)
++                nts = [node_to_slot[0]] * ssize  # promotion map (canonical default)
++                off = 0
++                for bi, path in enumerate(bp):
++                    chain = path[1:]
++                    for k, node in enumerate(chain):
++                        slot = int(row0[avail[off + k]].item())
++                        ssi_b[bi, k] = slot
++                        gather.append(node)
++                        node_first_pos.setdefault(node, len(gather) - 1)
++                        nts[node] = slot
++                    seed_slots.append(int(ssi_b[bi, 0].item()))
++                    off += len(chain)
++                    cu.append(len(gather))
++                tree_branch_gather = torch.tensor(gather, dtype=torch.long, device=dev)
++                tree_branch_cu = torch.tensor(cu, dtype=torch.int32, device=dev)
++                tree_branch_ssi = ssi_b
++                tree_branch_seed = seed_slots
++                tree_branch_scatter = torch.tensor(
++                    [node_first_pos[n] for n in range(1, ssize)],
++                    dtype=torch.long, device=dev,
++                )
++                drafter.current_node_to_slot = nts
++
          attn_metadata = GDNAttentionMetadata(
              num_prefills=num_prefills,
              num_prefill_tokens=num_prefill_tokens,
-@@ -443,6 +534,12 @@
+@@ -443,6 +582,17 @@
              spec_token_indx=spec_token_indx,
              non_spec_token_indx=non_spec_token_indx,
              num_accepted_tokens=num_accepted_tokens,
@@ -204,13 +252,28 @@
 +            tree_flat_pos=tree_flat_pos,
 +            tree_node_slots=tree_node_slots,
 +            tree_parent_slots=tree_parent_slots,
++            tree_branch_gather=tree_branch_gather,
++            tree_branch_cu=tree_branch_cu,
++            tree_branch_ssi=tree_branch_ssi,
++            tree_branch_seed=tree_branch_seed,
++            tree_branch_scatter=tree_branch_scatter,
 +            tree_parent_index=(list(cur_tree.parent_index) if tree_mode else None),
              nums_dict=nums_dict,
              batch_ptr=batch_ptr,
              token_chunk_offset_ptr=token_chunk_offset_ptr,
 --- a/vllm/model_executor/layers/mamba/gdn_linear_attn.py
 +++ b/vllm/model_executor/layers/mamba/gdn_linear_attn.py
-@@ -1251,7 +1251,50 @@
+@@ -31,6 +31,9 @@
+ )
+ from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
+ from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
++
++# DDTree profiling (env DFLASH_PROF). Cumulative seconds across the run.
++_DDPROF = {"gdn_baseline_s": 0.0, "gdn_depth_s": 0.0, "gdn_calls": 0}
+ from vllm.model_executor.layers.layernorm import RMSNormGated
+ from vllm.model_executor.layers.linear import (
+     ColumnParallelLinear,
+@@ -1251,7 +1254,93 @@
          # 2. Recurrent attention
  
          # 2.1: Process the multi-query part
@@ -225,6 +288,10 @@
 +            # is written before its children; canonical (root) slot is only read.
 +            # A baseline non-in-place call gives the correctly-shaped output tensor
 +            # (pool untouched); real-node outputs are then overwritten in tree order.
++            import os as _osm, time as _tm
++            _prof = bool(_osm.environ.get("DFLASH_PROF"))
++            if _prof:
++                torch.cuda.synchronize(); _b0 = _tm.perf_counter()
 +            core_attn_out_spec, last_recurrent_state = (
 +                fused_sigmoid_gating_delta_rule_update(
 +                    A_log=self.A_log, a=a, b=b, dt_bias=self.dt_bias,
@@ -238,26 +305,65 @@
 +                    use_qk_l2norm_in_kernel=True,
 +                )
 +            )
-+            for d in range(len(attn_metadata.tree_flat_pos)):
-+                fp = attn_metadata.tree_flat_pos[d]
-+                ns = attn_metadata.tree_node_slots[d]
-+                ps = attn_metadata.tree_parent_slots[d]
-+                n = fp.shape[0]
-+                ssi_d = torch.stack([ns, ps], dim=1).contiguous()
-+                nat_d = torch.full((n,), 2, dtype=torch.int32, device=fp.device)
-+                cu_d = torch.arange(n + 1, dtype=torch.int32, device=fp.device)
-+                out_d, _ = fused_sigmoid_gating_delta_rule_update(
++            if _prof:
++                torch.cuda.synchronize()
++                _DDPROF["gdn_baseline_s"] += _tm.perf_counter() - _b0
++                _d0 = _tm.perf_counter()
++            if getattr(attn_metadata, "tree_branch_gather", None) is not None:
++                # Directive 1: SINGLE batched per-branch launch (replaces the
++                # per-depth Python loop). Each root->leaf path is a varlen
++                # sequence seeded from a canonical copy; one kernel call.
++                g = attn_metadata.tree_branch_gather
++                cu = attn_metadata.tree_branch_cu
++                ssi_b = attn_metadata.tree_branch_ssi
++                nb = cu.shape[0] - 1
++                # seed each branch root slot from canonical (slot[num_accepted-1])
++                ca = 0
++                if num_accepted_tokens is not None:
++                    ca = int(num_accepted_tokens[0].item()) - 1
++                ca = max(0, min(ca, spec_state_indices_tensor.shape[1] - 1))
++                canon = int(spec_state_indices_tensor[0, ca].item())
++                for _s in attn_metadata.tree_branch_seed:
++                    if _s != canon:
++                        ssm_state[_s].copy_(ssm_state[canon])
++                nat_b = torch.ones(nb, dtype=torch.int32, device=g.device)
++                out_b, _ = fused_sigmoid_gating_delta_rule_update(
 +                    A_log=self.A_log,
-+                    a=a[fp].contiguous(), b=b[fp].contiguous(),
-+                    dt_bias=self.dt_bias,
-+                    q=query_spec[:, fp].contiguous(),
-+                    k=key_spec[:, fp].contiguous(),
-+                    v=value_spec[:, fp].contiguous(),
++                    a=a[g].contiguous(), b=b[g].contiguous(), dt_bias=self.dt_bias,
++                    q=query_spec[:, g].contiguous(),
++                    k=key_spec[:, g].contiguous(),
++                    v=value_spec[:, g].contiguous(),
 +                    initial_state=ssm_state, inplace_final_state=True,
-+                    cu_seqlens=cu_d, ssm_state_indices=ssi_d,
-+                    num_accepted_tokens=nat_d, use_qk_l2norm_in_kernel=True,
++                    cu_seqlens=cu, ssm_state_indices=ssi_b,
++                    num_accepted_tokens=nat_b, use_qk_l2norm_in_kernel=True,
 +                )
-+                core_attn_out_spec[:, fp] = out_d
++                sc = attn_metadata.tree_branch_scatter
++                core_attn_out_spec[:, 1 : 1 + sc.shape[0]] = out_b[:, sc]
++            else:
++                for d in range(len(attn_metadata.tree_flat_pos)):
++                    fp = attn_metadata.tree_flat_pos[d]
++                    ns = attn_metadata.tree_node_slots[d]
++                    ps = attn_metadata.tree_parent_slots[d]
++                    n = fp.shape[0]
++                    ssi_d = torch.stack([ns, ps], dim=1).contiguous()
++                    nat_d = torch.full((n,), 2, dtype=torch.int32, device=fp.device)
++                    cu_d = torch.arange(n + 1, dtype=torch.int32, device=fp.device)
++                    out_d, _ = fused_sigmoid_gating_delta_rule_update(
++                        A_log=self.A_log,
++                        a=a[fp].contiguous(), b=b[fp].contiguous(),
++                        dt_bias=self.dt_bias,
++                        q=query_spec[:, fp].contiguous(),
++                        k=key_spec[:, fp].contiguous(),
++                        v=value_spec[:, fp].contiguous(),
++                        initial_state=ssm_state, inplace_final_state=True,
++                        cu_seqlens=cu_d, ssm_state_indices=ssi_d,
++                        num_accepted_tokens=nat_d, use_qk_l2norm_in_kernel=True,
++                    )
++                    core_attn_out_spec[:, fp] = out_d
++            if _prof:
++                torch.cuda.synchronize()
++                _DDPROF["gdn_depth_s"] += _tm.perf_counter() - _d0
++                _DDPROF["gdn_calls"] += 1
 +        elif spec_sequence_masks is not None:
              core_attn_out_spec, last_recurrent_state = (
                  fused_sigmoid_gating_delta_rule_update(
@@ -477,10 +583,68 @@
  from vllm._aiter_ops import rocm_aiter_ops
  from vllm.compilation.decorators import support_torch_compile
  from vllm.config import (
-@@ -202,6 +205,23 @@
+@@ -202,6 +205,81 @@
          return final_hidden_states.view(orig_shape)
  
  
++import os as _osmod
++import time as _time
++
++# DDTree profiling (env DFLASH_PROF). Cumulative seconds across the run.
++_ATPROF = {"attn_tree_s": 0.0, "n": 0}
++
++def _os_env(name):
++    return bool(_osmod.environ.get(name))
++
++
++_FLEX_FN = None
++
++
++def _get_flex():
++    global _FLEX_FN
++    if _FLEX_FN is None:
++        from torch.nn.attention.flex_attention import flex_attention
++        _FLEX_FN = torch.compile(flex_attention)
++    return _FLEX_FN
++
++
++def _flex_tree_attn(Q, K, V, anc, nq, ctx_len, L, H, Hkv, D, scale, dev):
++    """Change 1: FlexAttention over a power-of-2-padded spec batch. Q:[nq,H,D],
++    K/V:[L,Hkv,D] (L=ctx_len+nq), anc:[nq,nq] ancestor mask. Returns [nq,H*D]
++    or None on any error (caller falls back to eager SDPA)."""
++    try:
++        from torch.nn.attention.flex_attention import create_block_mask
++        PAD = 16
++        rep = H // Hkv
++        Kx = K.repeat_interleave(rep, dim=1)  # [L, H, D] (GQA -> MHA)
++        Vx = V.repeat_interleave(rep, dim=1)
++        kvpad = 1 << max(4, (L - 1).bit_length())  # next pow2 >= L (>=16)
++        Qp = Q.new_zeros(PAD, H, D); Qp[:nq] = Q
++        Kp = Kx.new_zeros(kvpad, H, D); Kp[:L] = Kx
++        Vp = Vx.new_zeros(kvpad, H, D); Vp[:L] = Vx
++        fmask = torch.zeros(PAD, kvpad, dtype=torch.bool, device=dev)
++        if ctx_len > 0:
++            fmask[:nq, :ctx_len] = True
++        fmask[:nq, ctx_len:ctx_len + nq] = anc
++
++        def _mm(b, h, qi, kvi):
++            return fmask[qi, kvi]
++
++        bm = create_block_mask(_mm, B=None, H=None, Q_LEN=PAD, KV_LEN=kvpad,
++                               device=dev)
++        out = _get_flex()(
++            Qp.permute(1, 0, 2).unsqueeze(0),
++            Kp.permute(1, 0, 2).unsqueeze(0),
++            Vp.permute(1, 0, 2).unsqueeze(0),
++            block_mask=bm, scale=scale,
++        )
++        return out.squeeze(0).permute(1, 0, 2)[:nq].reshape(nq, H * D)
++    except Exception as _e:
++        if _os_env("DFLASH_DBG"):
++            print("DBG_FLEX_FAIL", repr(_e), flush=True)
++        return None
++
++
 +def _tree_attn_meta():
 +    """Return a GDNAttentionMetadata in tree mode for the current forward, or
 +    None. The full-attn layers read the tree structure (parent_index) from it to
@@ -501,7 +665,7 @@
  class Qwen3NextAttention(nn.Module):
      def __init__(
          self,
-@@ -312,12 +332,105 @@
+@@ -312,12 +390,119 @@
  
          attn_output = self.attn(q, k, v)
  
@@ -512,9 +676,16 @@
 +        # ancestors. Gated on tree mode; linear path is byte-identical.
 +        _tm = _tree_attn_meta()
 +        if _tm is not None and q.shape[0] <= (_tm.tree_num_nodes + 2):
++            _prof = _os_env("DFLASH_PROF")
++            if _prof:
++                torch.cuda.synchronize(); _a0 = _time.perf_counter()
 +            _eager = self._tree_eager_attn(q, k, v, _tm)
 +            if _eager is not None:
 +                attn_output = _eager
++            if _prof:
++                torch.cuda.synchronize()
++                _ATPROF["attn_tree_s"] += _time.perf_counter() - _a0
++                _ATPROF["n"] += 1
 +
          if self.attn_output_gate:
              gate = torch.sigmoid(gate)
@@ -587,10 +758,17 @@
 +            Qs = Q.permute(1, 0, 2).unsqueeze(0)   # [1, H, nq, D]
 +            Ks = K.permute(1, 0, 2).unsqueeze(0)   # [1, Hkv, L, D]
 +            Vs = V.permute(1, 0, 2).unsqueeze(0)
-+            out = F.scaled_dot_product_attention(
-+                Qs, Ks, Vs, attn_mask=mask.view(1, 1, nq, L),
-+                scale=self.scaling, enable_gqa=True,
-+            )
++            out = None
++            if _os_env("DFLASH_FLEX"):
++                # Change 1: fused FlexAttention over padded (power-of-2) spec
++                # batch instead of eager SDPA. Falls back to SDPA on any error.
++                out = _flex_tree_attn(Q, K, V, anc, nq, ctx_len, L, H, Hkv, D,
++                                      self.scaling, dev)
++            if out is None:
++                out = F.scaled_dot_product_attention(
++                    Qs, Ks, Vs, attn_mask=mask.view(1, 1, nq, L),
++                    scale=self.scaling, enable_gqa=True,
++                )
 +            import os as _os
 +            if _os.environ.get("DFLASH_DBG") and not getattr(Qwen3NextAttention, "_dbg_ok", False):
 +                Qwen3NextAttention._dbg_ok = True
@@ -609,21 +787,32 @@
      def __init__(
 --- a/vllm/v1/sample/rejection_sampler.py
 +++ b/vllm/v1/sample/rejection_sampler.py
-@@ -117,6 +117,13 @@
+@@ -34,6 +34,9 @@
+ MAX_SPEC_LEN = 128
+ 
+ 
++_NSTEPS = {'n': 0}
++
++
+ class RejectionSampler(nn.Module):
+     """
+     The implementation strictly follows the algorithm described in
+@@ -116,6 +119,14 @@
+                 requested.
          """
          assert metadata.max_spec_len <= MAX_SPEC_LEN
- 
++        _NSTEPS['n'] += 1
++
 +        # Change C: DDTree tree-aware acceptance (batch_size==1). Walk the tree
 +        # from the root, at each node following the child whose token matches the
 +        # target's greedy prediction after that node; emit the accepted path plus
 +        # the bonus token. Same output contract as linear: [batch, max_spec_len+1].
 +        if getattr(metadata, "tree_parent_index", None) is not None:
 +            return self._tree_accept(metadata, logits)
-+
+ 
          bonus_logits_indices = metadata.bonus_logits_indices
          target_logits_indices = metadata.target_logits_indices
- 
-@@ -194,6 +201,60 @@
+@@ -194,6 +205,60 @@
              logprobs_tensors=logprobs_tensors,
          )
  

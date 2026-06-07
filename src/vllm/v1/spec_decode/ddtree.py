@@ -61,31 +61,59 @@ def build_ddtree(
     W = tree_width
     nodes: list[TreeNode] = [TreeNode(token_id=root_token, depth=0, parent=-1, cum_logp=0.0)]
 
-    # frontier heap of candidate nodes not yet admitted: (-score, tie, payload)
-    # payload = (token_id, depth, parent_idx, cum_logp)
+    # --- 1. SPINE: the full-depth top-1 chain. This guarantees the linear
+    # DFlash top-1 path is a branch of the tree, so tree acceptance is always
+    # >= linear acceptance (the tree can only accept more, never fewer). ---
+    spine_idx = [0]  # node index at each depth (depth 0 = root)
+    prev = 0
+    cum = 0.0
+    for d in range(1, K + 1):
+        if len(nodes) >= node_budget:
+            break
+        cum += cand_logps[d - 1][0]
+        nodes.append(TreeNode(cand_token_ids[d - 1][0], depth=d, parent=prev, cum_logp=cum))
+        nodes[prev].children.append(len(nodes) - 1)
+        prev = len(nodes) - 1
+        spine_idx.append(prev)
+
+    # --- 2. BRANCHES: spend any spare budget on the best-first alternatives
+    # (rank>=1 candidates) hung off already-admitted nodes. ---
     heap: list[tuple[float, int, tuple[int, int, int, float]]] = []
     counter = 0
 
-    def push_children(parent_idx: int, parent_depth: int, parent_cum: float):
+    def push_alts(parent_idx, parent_depth, parent_cum, ranks):
         nonlocal counter
         d = parent_depth + 1
         if d > K:
             return
         row_t = cand_token_ids[d - 1]
         row_p = cand_logps[d - 1]
-        for r in range(min(W, len(row_t))):
-            cum = parent_cum + row_p[r]
-            heapq.heappush(heap, (-cum, counter, (row_t[r], d, parent_idx, cum)))
+        for r in ranks:
+            if r >= min(W, len(row_t)):
+                continue
+            c = parent_cum + row_p[r]
+            heapq.heappush(heap, (-c, counter, (row_t[r], d, parent_idx, c)))
             counter += 1
 
-    push_children(0, 0, 0.0)
+    # seed: rank>=1 alternatives at every spine depth (siblings of the spine)
+    for d in range(0, len(spine_idx)):
+        push_alts(spine_idx[d], d, nodes[spine_idx[d]].cum_logp, range(1, W))
 
     while heap and len(nodes) < node_budget:
-        _, _, (tok, d, par, cum) = heapq.heappop(heap)
+        _, _, (tok, d, par, c) = heapq.heappop(heap)
         idx = len(nodes)
-        nodes.append(TreeNode(token_id=tok, depth=d, parent=par, cum_logp=cum))
+        nodes.append(TreeNode(token_id=tok, depth=d, parent=par, cum_logp=c))
         nodes[par].children.append(idx)
-        push_children(idx, d, cum)
+        # an admitted branch node may extend with ALL ranks (0..W-1)
+        push_alts(idx, d, c, range(0, W))
+
+    # Step 5a: pad to a static node count (node_budget) so the verify batch is a
+    # fixed shape for CUDA-graph capture. Dummy nodes hang off the root with a
+    # sentinel depth (never matched in acceptance) and -inf cum_logp.
+    while len(nodes) < node_budget:
+        idx = len(nodes)
+        nodes.append(TreeNode(token_id=0, depth=K + 1, parent=0, cum_logp=-1e30))
+        nodes[0].children.append(idx)
 
     # nodes[] is already in admission order with parents before children
     # (root at 0; a child is admitted only after its parent). Flatten directly.

@@ -173,18 +173,33 @@ Engine config (mirrors `serve-35b.sh`): `quantization=compressed-tensors`,
 
 ---
 
-## 7. Benchmark (Jetson AGX Thor SM110a, eager, T=0)
+## 7. Benchmark (Jetson AGX Thor SM110a, T=0) + optimization arc
 
-| Config | tok/s | vs linear |
-|--------|------:|----------:|
-| W=1 (linear DFlash) | **44.74** | baseline |
-| W=2 (DDTree tree spec) | **16.56** | 0.37× (2.7× slower) |
+W=2 DDTree was optimized **3.6×** (15.4 → 56.2 tok/s) via three changes:
 
-Correct, coherent output; multi-token acceptance (paths of 4/2/5 tokens observed);
-W=1 byte-identical to linear. **Slower** because the eager reference adds large
-per-step overhead (per-depth GDN launches, a discarded `self.attn` + manual gather
-+ eager SDPA in every full-attn layer, host-side tree build/accept). See
-`benchmark_results/ddtree-gdn.md` for the full analysis.
+| W=2 stage | mode | τ | tok/s |
+|-----------|------|--:|------:|
+| bushy tree (no spine guarantee) | eager | 3.14 | 15.44 |
+| + **spine fix** (full top-1 chain always in tree) | eager | 5.48 | 22.51 |
+| + **GDN per-branch fusion** (single launch vs per-depth loop) | eager | 5.48 | 25.70 |
+| + **CUDA graphs** | graphs | 5.70 | **56.23** |
+
+**Head-to-head, both CUDA graphs (apples-to-apples):**
+
+| Config | τ | tok/s | vs linear |
+|--------|--:|------:|----------:|
+| W=1 linear DFlash | 5.75 | **78.0** | baseline |
+| W=2 DDTree (B=13) | 5.70 | **56.23** | 0.72× (28% slower) |
+
+**Key finding:** after the spine fix, **τ_tree ≈ τ_linear** (5.70 vs 5.75) — the
+tree no longer wastes steps. But at budget **B=13** the tree is the spine-only
+chain (12-deep spine + root = 13, **zero spare for branches**), so it equals
+linear in acceptance and can only be *slower* by the residual per-step overhead.
+**DDTree beats linear only when τ_tree > τ_linear ⇒ real branches ⇒ B ≫ K**,
+which is capped at K+1=13 by the runner's flat `num_speculative_tokens` and needs
+the scheduler rewrite. DFlash's draft is already strong (τ≈5.7), so tree breadth
+adds little at a tight budget. Full analysis + correctness in
+`benchmark_results/ddtree-gdn.md`.
 
 ---
 

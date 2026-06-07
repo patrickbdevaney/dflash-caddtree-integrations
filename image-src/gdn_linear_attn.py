@@ -31,6 +31,9 @@ from vllm.model_executor.layers.fla.ops import (
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
 from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
+
+# DDTree profiling (env DFLASH_PROF). Cumulative seconds across the run.
+_DDPROF = {"gdn_baseline_s": 0.0, "gdn_depth_s": 0.0, "gdn_calls": 0}
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -1261,6 +1264,10 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             # is written before its children; canonical (root) slot is only read.
             # A baseline non-in-place call gives the correctly-shaped output tensor
             # (pool untouched); real-node outputs are then overwritten in tree order.
+            import os as _osm, time as _tm
+            _prof = bool(_osm.environ.get("DFLASH_PROF"))
+            if _prof:
+                torch.cuda.synchronize(); _b0 = _tm.perf_counter()
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log, a=a, b=b, dt_bias=self.dt_bias,
@@ -1274,26 +1281,65 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                     use_qk_l2norm_in_kernel=True,
                 )
             )
-            for d in range(len(attn_metadata.tree_flat_pos)):
-                fp = attn_metadata.tree_flat_pos[d]
-                ns = attn_metadata.tree_node_slots[d]
-                ps = attn_metadata.tree_parent_slots[d]
-                n = fp.shape[0]
-                ssi_d = torch.stack([ns, ps], dim=1).contiguous()
-                nat_d = torch.full((n,), 2, dtype=torch.int32, device=fp.device)
-                cu_d = torch.arange(n + 1, dtype=torch.int32, device=fp.device)
-                out_d, _ = fused_sigmoid_gating_delta_rule_update(
+            if _prof:
+                torch.cuda.synchronize()
+                _DDPROF["gdn_baseline_s"] += _tm.perf_counter() - _b0
+                _d0 = _tm.perf_counter()
+            if getattr(attn_metadata, "tree_branch_gather", None) is not None:
+                # Directive 1: SINGLE batched per-branch launch (replaces the
+                # per-depth Python loop). Each root->leaf path is a varlen
+                # sequence seeded from a canonical copy; one kernel call.
+                g = attn_metadata.tree_branch_gather
+                cu = attn_metadata.tree_branch_cu
+                ssi_b = attn_metadata.tree_branch_ssi
+                nb = cu.shape[0] - 1
+                # seed each branch root slot from canonical (slot[num_accepted-1])
+                ca = 0
+                if num_accepted_tokens is not None:
+                    ca = int(num_accepted_tokens[0].item()) - 1
+                ca = max(0, min(ca, spec_state_indices_tensor.shape[1] - 1))
+                canon = int(spec_state_indices_tensor[0, ca].item())
+                for _s in attn_metadata.tree_branch_seed:
+                    if _s != canon:
+                        ssm_state[_s].copy_(ssm_state[canon])
+                nat_b = torch.ones(nb, dtype=torch.int32, device=g.device)
+                out_b, _ = fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
-                    a=a[fp].contiguous(), b=b[fp].contiguous(),
-                    dt_bias=self.dt_bias,
-                    q=query_spec[:, fp].contiguous(),
-                    k=key_spec[:, fp].contiguous(),
-                    v=value_spec[:, fp].contiguous(),
+                    a=a[g].contiguous(), b=b[g].contiguous(), dt_bias=self.dt_bias,
+                    q=query_spec[:, g].contiguous(),
+                    k=key_spec[:, g].contiguous(),
+                    v=value_spec[:, g].contiguous(),
                     initial_state=ssm_state, inplace_final_state=True,
-                    cu_seqlens=cu_d, ssm_state_indices=ssi_d,
-                    num_accepted_tokens=nat_d, use_qk_l2norm_in_kernel=True,
+                    cu_seqlens=cu, ssm_state_indices=ssi_b,
+                    num_accepted_tokens=nat_b, use_qk_l2norm_in_kernel=True,
                 )
-                core_attn_out_spec[:, fp] = out_d
+                sc = attn_metadata.tree_branch_scatter
+                core_attn_out_spec[:, 1 : 1 + sc.shape[0]] = out_b[:, sc]
+            else:
+                for d in range(len(attn_metadata.tree_flat_pos)):
+                    fp = attn_metadata.tree_flat_pos[d]
+                    ns = attn_metadata.tree_node_slots[d]
+                    ps = attn_metadata.tree_parent_slots[d]
+                    n = fp.shape[0]
+                    ssi_d = torch.stack([ns, ps], dim=1).contiguous()
+                    nat_d = torch.full((n,), 2, dtype=torch.int32, device=fp.device)
+                    cu_d = torch.arange(n + 1, dtype=torch.int32, device=fp.device)
+                    out_d, _ = fused_sigmoid_gating_delta_rule_update(
+                        A_log=self.A_log,
+                        a=a[fp].contiguous(), b=b[fp].contiguous(),
+                        dt_bias=self.dt_bias,
+                        q=query_spec[:, fp].contiguous(),
+                        k=key_spec[:, fp].contiguous(),
+                        v=value_spec[:, fp].contiguous(),
+                        initial_state=ssm_state, inplace_final_state=True,
+                        cu_seqlens=cu_d, ssm_state_indices=ssi_d,
+                        num_accepted_tokens=nat_d, use_qk_l2norm_in_kernel=True,
+                    )
+                    core_attn_out_spec[:, fp] = out_d
+            if _prof:
+                torch.cuda.synchronize()
+                _DDPROF["gdn_depth_s"] += _tm.perf_counter() - _d0
+                _DDPROF["gdn_calls"] += 1
         elif spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(

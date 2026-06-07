@@ -34,6 +34,9 @@ GREEDY_TEMPERATURE: tl.constexpr = 0
 MAX_SPEC_LEN = 128
 
 
+_NSTEPS = {'n': 0}
+
+
 class RejectionSampler(nn.Module):
     """
     The implementation strictly follows the algorithm described in
@@ -116,6 +119,7 @@ class RejectionSampler(nn.Module):
                 requested.
         """
         assert metadata.max_spec_len <= MAX_SPEC_LEN
+        _NSTEPS['n'] += 1
 
         # Change C: DDTree tree-aware acceptance (batch_size==1). Walk the tree
         # from the root, at each node following the child whose token matches the
