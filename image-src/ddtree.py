@@ -83,8 +83,28 @@ def build_ddtree(
         prev = len(nodes) - 1
         spine_idx.append(prev)
 
-    # --- 2. BRANCHES: spend any spare budget on the best-first alternatives
-    # (rank>=1 candidates) hung off already-admitted nodes. ---
+    # --- 2. BRANCHES ---
+    # Selective (DFLASH_SELECTIVE=1): place each spare node as a rank-2 child at
+    # the *most uncertain* spine position (max logp_rank2 - logp_rank1), where a
+    # branch is most likely to catch the target's choice. Else: best-first heap.
+    _selective = _os.environ.get("DFLASH_SELECTIVE") == "1"
+    if _selective:
+        spare = node_budget - len(nodes)
+        if spare > 0:
+            unc = []  # (uncertainty, depth) for spine positions with a rank-2
+            for d in range(1, len(spine_idx)):
+                row_p = cand_logps[d - 1]
+                if len(row_p) > 1:
+                    unc.append((row_p[1] - row_p[0], d))  # closer to 0 = more uncertain
+            unc.sort(reverse=True)
+            for _, d in unc[:spare]:
+                par = spine_idx[d - 1]
+                tok = cand_token_ids[d - 1][1]
+                c = nodes[par].cum_logp + cand_logps[d - 1][1]
+                nodes.append(TreeNode(token_id=tok, depth=d, parent=par, cum_logp=c))
+                nodes[par].children.append(len(nodes) - 1)
+
+    # best-first alternatives (rank>=1 candidates) hung off admitted nodes.
     heap: list[tuple[float, int, tuple[int, int, int, float]]] = []
     counter = 0
 
@@ -103,8 +123,9 @@ def build_ddtree(
             counter += 1
 
     # seed: rank>=1 alternatives at every spine depth (siblings of the spine)
-    for d in range(0, len(spine_idx)):
-        push_alts(spine_idx[d], d, nodes[spine_idx[d]].cum_logp, range(1, W))
+    if not _selective:
+        for d in range(0, len(spine_idx)):
+            push_alts(spine_idx[d], d, nodes[spine_idx[d]].cum_logp, range(1, W))
 
     while heap and len(nodes) < node_budget:
         _, _, (tok, d, par, c) = heapq.heappop(heap)

@@ -57,3 +57,22 @@ DDTree tree speculation works correctly on GDN-hybrid MoE but does not beat
 strong-draft linear DFlash at feasible node budgets. It would pay off for
 *weaker* drafts (lower linear τ → more room for branches to help) or *much
 larger* budgets (depth saturated, breadth additive).
+
+## Update — selective vs best-first branch placement (validated)
+
+Selective placement (spare nodes at the highest-uncertainty spine positions,
+max logp_rank2 - logp_rank1) vs best-first heap, same budget (num_spec=15,
+spine-12, B=16, eager):
+
+| branch strategy | τ | tok/s |
+|---|---:|---:|
+| **Selective** (uncertainty-targeted) | **4.70** | 18.7 |
+| Best-first (heap, ~uniform) | 4.31 | 16.2 |
+
+Selective beats best-first (+0.39 τ, +9%). The user's insight holds: spare
+budget belongs at the most-uncertain positions. Absolute τ is still below linear
+here because the num_speculative_tokens=15 shortcut DEGRADES the draft (DFlash
+conditions on mask-token count, so a 15-mask draft predicts every position worse
+than a 12-mask draft) AND the spine-12 cap sacrifices depth 13-15. The clean test
+(num_spec=12 draft + selective branches via decoupling) is future work. The
+selective strategy itself is the validated improvement over best-first/uniform.
