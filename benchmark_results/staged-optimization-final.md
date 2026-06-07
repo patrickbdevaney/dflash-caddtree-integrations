@@ -62,6 +62,16 @@ depth loop, 13×13 GEMMs fill 66% of one tensor-core tile (latency-bound), and t
 CUDA graphs already removed launch overhead. Only wins at B≫16. Not worth
 building. (Full analysis: `stage5-tree-wy-flop-analysis.md`.)
 
+## Option X (B≫K decouple): provably futile — skipped without the rewrite
+
+The tree's measured per-step overhead ratio is 66/90.7 ≈ **0.73** (tree+typical
+tok/s ÷ linear+typical tok/s, both CUDA graphs). For *any* tree config to match
+linear+typical's throughput it would need τ > 6.84 / 0.73 ≈ **9.4**, far above the
+measured τ ceiling (~7.5 from the offline probe, and tree+typical's actual τ is
+6.35 < linear's 6.84). So no amount of breadth — including the full Option-X
+decouple — can beat linear+typical. The large #42121-class scheduler rewrite is
+**not pursued**: the data rules it out before building it.
+
 ## Bottom line
 
 - **Ship: linear DFlash + typical acceptance (eps≈0.09) at T>0 → +11% tok/s,
