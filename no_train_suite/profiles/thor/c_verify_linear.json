@@ -1,0 +1,18 @@
+{
+  "device": "Jetson AGX Thor SM110a",
+  "model": "Qwen3.6-35B-A3B-NVFP4 + DFlash",
+  "mode": "CUDA graphs, T=0, 20-prompt mixed seed set",
+  "metric": "per_step_ms = wall/steps = C_draft + C_verify(k)",
+  "curve": [
+    {"k": 1,  "per_step_ms": 47.869, "tau": 1.819, "tok_s": 37.99},
+    {"k": 2,  "per_step_ms": 50.823, "tau": 2.441, "tok_s": 48.02},
+    {"k": 4,  "per_step_ms": 57.458, "tau": 3.128, "tok_s": 54.43},
+    {"k": 6,  "per_step_ms": 63.528, "tau": 3.350, "tok_s": 52.73},
+    {"k": 8,  "per_step_ms": 65.111, "tau": 3.536, "tok_s": 54.30},
+    {"k": 10, "per_step_ms": 68.812, "tau": 3.760, "tok_s": 54.64},
+    {"k": 12, "per_step_ms": 70.789, "tau": 3.987, "tok_s": 56.32}
+  ],
+  "verdict": "INCREASING (~linear, +2.1 ms/token marginal). NOT flat/bandwidth-bound.",
+  "marginal_ms_per_token": 2.08,
+  "throughput_note": "tok/s rises sharply k=1->4 (38->54) then PLATEAUS k=4..12 (52.7-56.3, max at k=12). Flat plateau bounds adaptive-K upside."
+}
