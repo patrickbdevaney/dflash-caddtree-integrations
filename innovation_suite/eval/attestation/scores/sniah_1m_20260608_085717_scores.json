@@ -1,0 +1,6 @@
+{"eval":"S-NIAH 1M","model":"Qwen3.6-35B-A3B-NVFP4","extension":"DroPE factor4 zero-shot inference-time (no recal)",
+ "kv":"bf16","spec_decode":false,"hardware":"SM110a Jetson Thor","N_per_cell":5,"ctx":1000000,
+ "by_position":{"p05_~50k":{"hits":"5/5","wilson95":[0.566,1.0]},
+                "p50_~500k":{"hits":"4/5","wilson95":[0.376,0.964]},
+                "p95_~950k":{"hits":"5/5","wilson95":[0.566,1.0]}},
+ "overall":"14/15","claim_tier":"scouting (N=5); p95 5/5 but Wilson lo=0.566 -> N>=13 needed for lo>0.8 headline"}

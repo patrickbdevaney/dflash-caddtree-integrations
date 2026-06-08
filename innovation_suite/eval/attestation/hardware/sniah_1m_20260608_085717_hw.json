@@ -1,0 +1,8 @@
+{
+  "run_id": "sniah_1m_20260608_085717",
+  "utc": "2026-06-08T12:57:17.610850Z",
+  "gpu": "NVIDIA Thor",
+  "cuda_cap": "11.0",
+  "uname": "Linux localhost.localdomain 6.8.12-tegra #1 SMP PREEMPT Tue Dec 30 15:40:41 PST 2025 aarch64 aarch64 aarch64 GNU/Linux",
+  "mem_gb": "Mem:             122           5         118           0           0         117"
+}

@@ -1,0 +1,3 @@
+{"eval_type":"S-NIAH_1M","model_id":"Qwen3.6-35B-A3B-NVFP4","rope":{"type":"drope","factor":4.0,"original_max":262144,"max_model_len":1010000},
+ "kv_cache_dtype":"auto_bf16","spec_decode":false,"enforce_eager":true,"needle":"magic-number synthetic","samples_per_cell":5,"ci":"wilson95",
+ "harness":"tests/niah_1m.py","drope_impl":"qwen3_next.py cache-shape-parity"}
