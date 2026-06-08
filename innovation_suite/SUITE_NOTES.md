@@ -21,6 +21,20 @@ Design docs committed (designs/stage4_drope_RFC.md, stage5_snapkv_RFC.md, stage6
 Each is >300 LOC fail-quiet AND needs 262k-512k forward passes (memory/time-heavy, OOM-risk on a
 single 35B at 512k). Per rule 3 these are RFC-flagged with default-off flags, NOT blind-built in
 the overnight window. Designs ready for a dedicated 512k-capable session.
+## Stage 4 DroPE — graph-mode strict-bitwise UNACHIEVABLE; eager is bitwise (2026-06-08)
+Three DroPE formulations all fail the strict within-native bitwise gate UNDER CUDA GRAPHS with
+the same benign ~14-16/20 near-tie divergence: (1) where-on-q/k -> graph break (bool(Tensor));
+(2) positions-clamp -> where adds a graph op -> 16/20 drift; (3) cache-append identity rows ->
+changing cos_sin_cache SHAPE triggers torch.compile RECOMPILATION -> benign near-tie drift
+14/20 within native (DroPE inactive there -> pure compiled-graph numeric perturbation, NOT a
+logic error; same class as align-vs-none). ROOT TENSION: covering >native needs a bigger cache
+(or a runtime branch), which recompiles -> not bitwise vs the baseline graph. RESOLUTION (per
+decision rule): run DroPE correctness + the 1M proof in EAGER (no recompilation -> cache rows
+<native untouched + plain forward -> bitwise within native). Graph-mode DroPE perf parity is a
+documented follow-up (would need the rotary built at the extended length for BOTH baseline and
+DroPE so the cache shape matches). The persistent B3 orchestration correctly ABORTED the 1M run
+on each graph-mode Gate-A fail (gating + setsid persistence both verified working).
+
 ## Amendment update — long-context VIABLE + DroPE BUILT (2026-06-08)
 MAX_VIABLE_CONTEXT probe: Qwen3.6 ran at max_model_len=262144 with a 200k-tok prompt (135s,
 1480 tok/s) -> {passed:true, mode:full, context_length_used:262144}. Long-context regime is
