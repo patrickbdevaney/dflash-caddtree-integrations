@@ -1,3 +1,13 @@
+RESUME: NIAH complete 2026-06-08 (p05 5/5, p50 4/5, p95 5/5; overall 14/15; DroPE zero-shot 1M).
+Autonomous code-contribution run (C1-C7) follows. Branches ready for PR submission listed in
+INNOVATION_SUITE_SUMMARY.md. Deferred (need supervised GPU): RULER, LongPPL, SnapKV eval,
+DroPE+MRoPE gate, Nemotron (version-blocked). See EVAL_TODO.md for full priority order.
+
+## Spearman rank correlation (LongPPL vs NIAH) — N/A (2026-06-08)
+Not computable: no LongPPL config sweep was run (Phase A deferred), and NIAH covers a SINGLE
+config (DroPE). Spearman needs >=2 paired (LongPPL-rank, NIAH-rank) configs. Requires a future
+LongPPL sweep (YaRN/DroPE/baseline) + matching NIAH cells. Recorded as N/A, not fabricated.
+
 ## [DroPE] GATE-2 PASS — 20/20 BITWISE under CUDA graphs (2026-06-08)
 DroPE@1010000 vs YaRN@1010000, within native, graphs ON: **BYTE_IDENTICAL (20/20)**. The
 cache-shape-parity fix WORKS -> DroPE is graph-safe AND bitwise within native (no torch.compile
