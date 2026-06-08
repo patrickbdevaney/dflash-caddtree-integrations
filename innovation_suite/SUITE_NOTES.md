@@ -1,3 +1,12 @@
+INCIDENT + RESUME (2026-06-08): A container-contention mistake (I launched the LongPPL disc
+phase TWICE; the duplicate docker runs fought for the GPU -> "Created" stalls) cost ~6h, and the
+subsequent force-kills left the docker/nvidia runtime WEDGED (docker commands hang, new containers
+stuck in "Created"). RULER is DEFERRED per user. LongPPL is BLOCKED until the runtime is cleared.
+RECOVERY (user-gated; do NOT auto-restart docker — would kill friendly vllm-executor*/rustdesk):
+either wait for the nvidia runtime to self-recover, or `sudo systemctl restart docker` (kills all
+containers), or reboot. Then resume LongPPL as ONE named detached container (run_longppl.sh,
+smoke first). Lesson: enforce ONE container via a name + `docker ps` precheck before every launch.
+
 BRANCH ADDED (2026-06-08): origin/pr/gdn-tree-spec-rfc (off upstream/main, fork-only, GPG-signed,
 NOT PR'd). Reference impl for the tree-spec RFC: ddtree.py (torch-free core, 4/4 host unit tests
 PASS) + ddtree_RFC.md + test_ddtree.py. RFC not feature-PR (negative result: doesn't beat linear,
