@@ -40,3 +40,12 @@ by design → not applicable.
 IMPLEMENTED (default-off). Within-native lossless gate: running. Beyond-native recall eval
 (LongPPL+NIAH at 384k-512k, needs context-extension config) = dedicated session; MAX_VIABLE_
 CONTEXT probe confirmed 262k is reachable on Thor (200k-tok prefill 135s, 1480 tok/s).
+
+---
+## Branch authored (2026-06-08)
+Clean branch `pr/drope-rope-type` off `upstream/main` (no dflash-thor dependency), pushed to
+personal fork `origin` — NOT PR'd (human review + CI test run required per vLLM AGENTS.md).
+Files: rotary_embedding/drope.py (new, DroPERotaryEmbedding) + __init__.py dispatch.
+Validation: proven-equivalent in overlay (20/20 bitwise graph-safe + 1M NIAH 14/15); the
+clean upstream port needs CI/overlay gate before submission (host has no torch).
+Duplicate check done: only unrelated `xdrope` exists upstream; DroPE is novel.

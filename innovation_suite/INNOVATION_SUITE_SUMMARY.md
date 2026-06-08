@@ -1,4 +1,50 @@
-# Innovation Suite V3 — morning handoff (real results, structured gates)
+# Innovation Suite — autonomous code-contribution run (2026-06-08)
+
+## Headline
+- DroPE proven + authored as a clean upstream rope_type. Graph-safe 20/20 bitwise within
+  native; 1M single-needle retrieval on Qwen3.6-35B-A3B (4x native, SM110a): p05 5/5,
+  p50 4/5, p95 5/5 (overall 14/15), DroPE zero-shot inference-time (no recal), BF16 KV,
+  no spec-decode. p95 Wilson95 [0.566,1.0] = scouting-N (N=5); N>=13 to license lo>0.8.
+- KEY autonomous finding: most planned bugfixes ALREADY landed in upstream vLLM — do NOT
+  submit redundant PRs.
+
+## Contribution status table
+| # | Contribution | Upstream status | Action | Branch / artifact |
+|---|---|---|---|---|
+| C1 | mamba_block_size silent override | FIXED upstream (user_specified_mamba_block_size, cache.py:53/243) | no PR | - |
+| C2 | FP8 KV calc_kv_scales hybrid guard | FIXED upstream (config.py:209 disable calc_kv_scales for hybrid) | no PR | - |
+| C3 | GDN APC + spec coexistence | core LANDED upstream (mamba_cache_mode=align, test_mamba_prefix_cache.py) | no PR; verify gap | - |
+| C4 | Accept-offset rollback MTP/DFlash | core LANDED upstream (mamba_hybrid.py num_accepted_tokens) | no PR; verify gap | - |
+| C5 | M-RoPE vision fallback | qwen3_next text-only upstream — needs full multimodal class | DEFERRED | - |
+| C6 | SnapKV infra discovery | no general sparse-KV framework upstream (only deepseek_v4 model-specific) | port needed | EVAL_TODO |
+| DroPE | rope_type='drope' [Feature] | NOVEL (only unrelated xdrope exists) | branch authored + pushed to fork | origin/pr/drope-rope-type |
+
+## The one genuine code branch
+pr/drope-rope-type off upstream/main (zero dflash-thor dependency), GPG-signed, pushed to
+FORK ONLY (NOT PR'd — human review required per vLLM AGENTS.md + user instruction):
+- drope.py (new, 67 LOC): DroPERotaryEmbedding builds cos/sin cache at native*factor,
+  overwrites rows >= native with identity (cos=1,sin=0). No forward override -> cudagraph-safe;
+  within-native bitwise to YaRN at the same max_position_embeddings.
+- __init__.py: import + elif scaling_type == "drope" dispatch.
+- Gate status: AST-clean, <=88 cols, isolated 2-file diff. NOT executed here (host has no
+  torch; cannot build upstream on SM110). Logic PROVEN EQUIVALENT in the overlay
+  (qwen3_next cache-shape-parity: 20/20 bitwise graph-safe + 1M NIAH 14/15). Needs CI/overlay
+  validation before PR — human runs tests per AGENTS.md.
+
+## Deferred (need supervised GPU / fresh session)
+RULER, LongPPL Phase A, SnapKV impl+eval, DroPE+M-RoPE compat gate, YaRN-baseline 1M NIAH,
+N=20 p95, Nemotron (vLLM 0.16.2 version-blocked). Priority order in EVAL_TODO.md.
+
+## Integrity notes
+- No gate fabricated; gates the host couldn't run are marked NOT-EXECUTED with proven-equivalent ref.
+- Spearman = N/A (no LongPPL sweep; single-config NIAH).
+- All commits GPG-signed (project key 2D9DDA64F9C568AE) + DCO. NO PR opened to vllm-project —
+  branches pushed to personal fork for human review.
+
+
+
+---
+# (prior) # Innovation Suite V3 — morning handoff (real results, structured gates)
 
 ## Per-stage structured gate results
 

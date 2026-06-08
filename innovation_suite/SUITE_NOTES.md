@@ -1,3 +1,11 @@
+RESUME (2026-06-08): Autonomous code-contribution run complete. ONE genuine branch ready
+for PR review: pr/drope-rope-type (pushed to fork origin, NOT PR'd — human reviews diff + runs
+CI per vLLM AGENTS.md). KEY FINDING: C1/C2 already fixed upstream, C3/C4 core landed upstream
+(no redundant PRs); C5 needs full multimodal (deferred); C6 SnapKV needs porting (no upstream
+infra). Deferred (supervised GPU): RULER, LongPPL, SnapKV eval, DroPE+MRoPE gate, YaRN-baseline
+1M, N=20 p95, Nemotron(0.16.2-blocked). Next: human reviews pr/drope-rope-type diff, runs vLLM
+CI, then submits; file tree-spec + snapkv RFC issues. See INNOVATION_SUITE_SUMMARY.md + EVAL_TODO.md.
+
 RESUME: NIAH complete 2026-06-08 (p05 5/5, p50 4/5, p95 5/5; overall 14/15; DroPE zero-shot 1M).
 Autonomous code-contribution run (C1-C7) follows. Branches ready for PR submission listed in
 INNOVATION_SUITE_SUMMARY.md. Deferred (need supervised GPU): RULER, LongPPL, SnapKV eval,
