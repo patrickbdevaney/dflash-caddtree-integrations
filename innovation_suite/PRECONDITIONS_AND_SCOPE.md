@@ -1,3 +1,14 @@
+# CORRECTION (model located by user)
+Nemotron IS present: `~/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` (120B, 17 shards) + serve
+script `~/serve-35b/serve-nemotron-120b.sh`. Verified config: max_position_embeddings=**262144
+(262k, NOT 1M)**; rope_theta=10000 & rope_scaling=None (config carries RoPE params — the
+"NoPE everywhere" claim is NOT confirmed by config; model code may not apply it — must verify,
+do not assume); GQA 32Q/2KV head_dim128; arch NemotronHForCausalLM (nemotron_h hybrid). Serve
+image = `vllm-thor:qwen35-latest` (different from the dflash overlay); serve script **omits
+spec-decode** ("MTP omitted for stability") -> MTP smoke stages may be unstable. 120B memory
+89-117GB -> standalone only, in-container memory gate. Stages at 512k-1M EXCEED the model's
+262k config.
+
 # Innovation Suite V2 — preconditions & honest scope (verified against the box)
 
 ## Precondition findings (verified, not assumed)
