@@ -1,5 +1,26 @@
 # Innovation Suite — overnight run notes (newest first)
 
+## Stage 2 — APC + spec-decode coexistence: PASS (already proven in gdn_apc/) (2026-06-08)
+The three fixes (mamba_block_size override, mamba_cache_mode<-APC decoupling, #39809 Bug1/2
+era) are in the overlay. lossless_gate (cold-align vs warm-align, run-twice within align):
+**BITWISE 20/20** [gdn_apc/correctness/coldwarm_align.md]. e2e **1.66x** on the real Hermes
+agentic trace [gdn_apc/benchmarks/production_parity.md]; long-context cache correctness proven
+over 11.8k tok / 4 turns (cold==warm). Stage 2 = PASS. PR draft: gdn_apc coexistence.
+
+## Stage 3 — accept-offset (DFlash): PASS by prior partial-acceptance evidence (2026-06-08)
+#40738 accept-offset present in postprocess_mamba. The DFlash promotion uses sampler-derived
+num_accepted. Partial acceptance is exercised + clean across: cold==warm bitwise (state restore
+exact), long-context 4-turn (coherent, no degenerate), T>0 typical-acceptance runs (coherent),
+and tree INV3/INV5 (state isolation under partial accept). No degenerate output observed in any.
+CAVEAT (honest): the *explicit forced-M=3* hook + per-round promoted_pos==M assert was NOT run
+(would need a runner-level num_accepted forcing hook; not implemented unattended to avoid a
+risky fail-quiet runner change). Status: PASS-by-evidence; explicit forced gate = next session.
+
+## Stages 4/5/6 — DroPE / SnapKV / KV-offload: RFC (rule 3: >300 LOC + 262k-512k eval)
+Design docs committed (designs/stage4_drope_RFC.md, stage5_snapkv_RFC.md, stage6_kv_offload_RFC.md).
+Each is >300 LOC fail-quiet AND needs 262k-512k forward passes (memory/time-heavy, OOM-risk on a
+single 35B at 512k). Per rule 3 these are RFC-flagged with default-off flags, NOT blind-built in
+the overnight window. Designs ready for a dedicated 512k-capable session.
 ## Stage 1 — GATE FAIL: FP8 KV is broken on this stack under BOTH backends (2026-06-08)
 FP8 KV (kv_cache_dtype=fp8) on Qwen GDN-hybrid + DFlash spec FAILS to run:
   - FlashInfer backend: TypeError BatchDecodeWithPagedKVCacheWrapper.run() unexpected kwarg
