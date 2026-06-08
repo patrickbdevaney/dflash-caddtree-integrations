@@ -1,3 +1,21 @@
+## SESSION HANDOFF (2026-06-08) — DroPE root-cause FIXED, clean gate running
+RESUME: tail -40 ~/dflash-dev/dropegate_status.log ; pgrep -f run_dropegate ; docker ps
+ROOT CAUSE of last session's 14/20 within-native divergence: DroPE extended its cos/sin cache
+while the BASELINE kept a native-size cache -> different shapes -> torch.compile RECOMPILED ->
+benign near-tie drift. ALSO a bug: my surgery used cache.shape[0] as the drop threshold instead
+of the model NATIVE (262144).
+FIX APPLIED (qwen3_next.py): drop threshold = DFLASH_DROPE_NATIVE (262144); cache rebuilt to
+DFLASH_DROPE_MAX (1010000) = rows[0:native] standard + rows[native:target] identity, so it
+MATCHES the YaRN baseline cache shape at the same --max-model-len -> same graph -> no recompile.
+Harness: added DFLASH_YARN (rope_scaling yarn factor4 original_max262144) so the baseline also
+builds a 1010000-shape cache. ONE clean PID-tracked gate launched (run_dropegate.sh, /tmp/
+dropegate.pid): DroPE@1010000 vs YaRN@1010000, graphs, BF16, no-spec, within-native bitwise.
+EXPECTED: BYTE_IDENTICAL (both standard RoPE <native, same shape). If so -> DroPE graph-safe
++ bitwise -> proceed to B3 1M (niah_1m.py ready). If DIVERGENCE -> another recompile source
+(check startup log for 'recompile'/guard on rope_type string). If OOM@1010000 -> step down.
+PRIME RULES honored: ONE container (assert_clean_gpu between each), PID file, run_b3.sh disabled.
+COMPLETE: S0 gate, S2 APC (proven), S1 FP8 root-cause (documented). PENDING: DroPE gate (running),
+B3 1M, S3 accept-offset, S5 SnapKV, S6 offload.
 ## Stage 4 DroPE / B3 — HONEST STOP (2026-06-08, session exhausted)
 DroPE IMPLEMENTED (cache-based, default-off DFLASH_DROPE, committed) but the within-native
 BITWISE gate is UNMET and the 1M proof did NOT run. Real results:
