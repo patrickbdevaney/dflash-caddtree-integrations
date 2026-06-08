@@ -1,3 +1,9 @@
+BRANCH ADDED (2026-06-08): origin/pr/gdn-tree-spec-rfc (off upstream/main, fork-only, GPG-signed,
+NOT PR'd). Reference impl for the tree-spec RFC: ddtree.py (torch-free core, 4/4 host unit tests
+PASS) + ddtree_RFC.md + test_ddtree.py. RFC not feature-PR (negative result: doesn't beat linear,
+O(B^2 d)). Two fork branches now ready for human review: pr/drope-rope-type ([Feature]) and
+pr/gdn-tree-spec-rfc ([RFC reference]).
+
 RESUME (2026-06-08): Autonomous code-contribution run complete. ONE genuine branch ready
 for PR review: pr/drope-rope-type (pushed to fork origin, NOT PR'd — human reviews diff + runs
 CI per vLLM AGENTS.md). KEY FINDING: C1/C2 already fixed upstream, C3/C4 core landed upstream
