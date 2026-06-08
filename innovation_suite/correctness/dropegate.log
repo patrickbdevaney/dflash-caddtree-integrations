@@ -1,0 +1,17 @@
+================ DROPEGATE_START Sun Jun  7 10:53:42 PM EDT 2026 (pid 2319815) ================
+[clean:start] containers=0
+#19 naming to docker.io/library/vllm-dflash-thor:ddtree done
+--- YaRN baseline @1010000 (graphs) ---
+[clean:yarn] containers=0
+GEN {"T": 0.0, "tau": 2134.0, "tok_s": 34.9, "eps": "0", "graphs": "1"}
+GEN {"T": 0.3, "tau": 2032.0, "tok_s": 44.01, "eps": "0", "graphs": "1"}
+GEN {"T": 0.5, "tau": 2142.0, "tok_s": 45.46, "eps": "0", "graphs": "1"}
+--- DroPE @1010000 (graphs, native=262144) ---
+[clean:drope] containers=0
+GEN {"T": 0.0, "tau": 2134.0, "tok_s": 41.52, "eps": "0", "graphs": "1"}
+GEN {"T": 0.3, "tau": 2032.0, "tok_s": 44.48, "eps": "0", "graphs": "1"}
+GEN {"T": 0.5, "tau": 2142.0, "tok_s": 45.35, "eps": "0", "graphs": "1"}
+[clean:post] containers=0
+--- GATE: within-native bitwise (DroPE vs YaRN, both @1010000) ---
+BYTE_IDENTICAL (20 prompts)
+================ DROPEGATE_DONE Sun Jun  7 11:06:12 PM EDT 2026 ================

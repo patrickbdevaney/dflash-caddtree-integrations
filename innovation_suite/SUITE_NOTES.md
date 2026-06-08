@@ -1,3 +1,8 @@
+## [DroPE] GATE-2 PASS — 20/20 BITWISE under CUDA graphs (2026-06-08)
+DroPE@1010000 vs YaRN@1010000, within native, graphs ON: **BYTE_IDENTICAL (20/20)**. The
+cache-shape-parity fix WORKS -> DroPE is graph-safe AND bitwise within native (no torch.compile
+recompile drift). Both configs loaded at max_model_len=1010000 with no OOM. DroPE is now a
+correct, graph-compatible rope extension (eager-only constraint REMOVED). Launching B3 1M proof.
 ## SESSION HANDOFF (2026-06-08) — DroPE root-cause FIXED, clean gate running
 RESUME: tail -40 ~/dflash-dev/dropegate_status.log ; pgrep -f run_dropegate ; docker ps
 ROOT CAUSE of last session's 14/20 within-native divergence: DroPE extended its cos/sin cache
