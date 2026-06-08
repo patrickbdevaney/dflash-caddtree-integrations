@@ -1,3 +1,26 @@
+## Stage 4 DroPE / B3 — HONEST STOP (2026-06-08, session exhausted)
+DroPE IMPLEMENTED (cache-based, default-off DFLASH_DROPE, committed) but the within-native
+BITWISE gate is UNMET and the 1M proof did NOT run. Real results:
+- Graph-mode (3 formulations): benign ~14/20 near-tie divergence within native, caused by
+  torch.compile RECOMPILATION when the cos/sin cache shape changes to cover >native (DroPE is
+  inactive <native -> pure compiled-graph perturbation, not a logic error). Strict bitwise is
+  unachievable under graphs unless BOTH baseline and DroPE build the rotary at the SAME extended
+  length (so the cache shape matches -> no recompile). That is the real graph-mode fix (TODO).
+- Eager Gate A: the DroPE-OFF baseline run crashed (downstream diff FileNotFoundError captured;
+  the docker error was grep-filtered out). Most likely an OOM/contention from THREE overlapping
+  setsid orchestrators I launched (they serialized on the GPU-wait and raced) -- baseA is the
+  plain model+eager, so probably not a DroPE bug. Race stopped; run_b3.sh disabled (renamed).
+- The setsid persistence + Gate gating WORKED (aborted the 1M run on every Gate-A fail; never
+  burned hours). The failure was DroPE never passing Gate A, plus my own multi-launch race.
+
+CLEAN NEXT-SESSION PLAN (launch ONE instance):
+1. Eager baseA (DroPE off) ALONE -> confirm clean (rule out OOM/race). If it still crashes,
+   inspect the harness kwargs (calculate_kv_scales / fp8 wiring) added this session.
+2. Eager DroPE-on vs DroPE-off (cache-based) within-native -> expect BITWISE (no recompile).
+   If bitwise -> niah_1m.py at 262k (proven viable 135s/200k), then 512k/1M w/ OOM step-down,
+   BF16 KV, no spec-decode, magic-number needles, Wilson CI (harness tests/niah_1m.py ready).
+3. Graph-mode parity: build rotary at extended length for baseline too -> no recompile -> bitwise.
+Reusable: setsid + status log + B3_MONITORING.md. Launch exactly ONE orchestrator next time.
 # Innovation Suite — overnight run notes (newest first)
 
 ## Stage 2 — APC + spec-decode coexistence: PASS (already proven in gdn_apc/) (2026-06-08)
