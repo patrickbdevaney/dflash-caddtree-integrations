@@ -21,6 +21,16 @@ Design docs committed (designs/stage4_drope_RFC.md, stage5_snapkv_RFC.md, stage6
 Each is >300 LOC fail-quiet AND needs 262k-512k forward passes (memory/time-heavy, OOM-risk on a
 single 35B at 512k). Per rule 3 these are RFC-flagged with default-off flags, NOT blind-built in
 the overnight window. Designs ready for a dedicated 512k-capable session.
+## Amendment update — long-context VIABLE + DroPE BUILT (2026-06-08)
+MAX_VIABLE_CONTEXT probe: Qwen3.6 ran at max_model_len=262144 with a 200k-tok prompt (135s,
+1480 tok/s) -> {passed:true, mode:full, context_length_used:262144}. Long-context regime is
+reachable on Thor; Stages 4/5 eval feasible at 262k (>262k needs extension config).
+Discriminator nvidia/Llama-3.1-8B-Instruct-NVFP4 CONFIRMED present (pure Transformer, correct
+cross-family per LongPPL paper). Qwen3.6 native=262k (text_config), no rope_scaling.
+Per RFC-process amendment: DroPE BUILT (not deferred) -- ~20 LOC, default-off DFLASH_DROPE,
+identity rotation for positions>=native on the 10 attention layers; within-native gate running.
+[Feature] PR draft: pr_drafts/drope.md. Beyond-native recall eval = dedicated session.
+
 ## Stage 1 — GATE FAIL: FP8 KV is broken on this stack under BOTH backends (2026-06-08)
 FP8 KV (kv_cache_dtype=fp8) on Qwen GDN-hybrid + DFlash spec FAILS to run:
   - FlashInfer backend: TypeError BatchDecodeWithPagedKVCacheWrapper.run() unexpected kwarg
