@@ -321,3 +321,40 @@ protocol as the text-only gates:
 The image hash (sha256 of the image file) should be
 recorded in each raw output record so the exact
 image used for each gate run is reproducible.
+
+---
+
+## ⭐ TIER 1 — vLLM #43587: APC on GDN-hybrid MULTIMODAL [Bugfix] — OPEN, UNCLAIMED, YOUR ARCHITECTURE
+
+**Issue:** vllm-project/vllm #43587 "[Bug]: Prefix caching fails for incremental multimodal
+requests on Mamba-Attention hybrid models (Qwen3.5)" — opened 2026-05-25, label `bug`, OPEN,
+no fix. The only comment (jshaofa-ui) is an AI-generated speculative analysis, NOT a fix.
+Zero open PRs cite it. **Genuinely unclaimed.**
+
+**Symptom (= your growing-prefill agentic bug, multimodal version):** multi-turn agentic, each
+turn adds one more image; shared prefix blocks have identical hashes but `num_cached_tokens`
+is always 0. Specific to GDN+Attention hybrid (Qwen3_5ForConditionalGeneration); pure-attention
+VL (Qwen3-VL-4B) works. The text-only GDN APC line (#30877 etc.) never covered the multimodal
+path — so this is NOT redundant.
+
+**Why it's yours:** the bug locus is `vllm/v1/core/kv_cache_utils.py` (~L599-637) — the prefix-
+cache block-alignment invariant that branches on `mamba_cache_mode == "align"` and on mamba-
+group block-size divisibility. That is exactly the align-mode / mamba_block_size machinery you
+worked on. Multimodal trigger: appended image-token placeholders shift token alignment so the
+hybrid block-alignment makes hits collapse to 0. Sibling OPEN PR #40709 fixes a DIFFERENT bug in
+the same `_mamba_block_aligned_split` + mm path (scheduling deadlock) — area is live but #43587
+is unfixed.
+
+**Honest status:** your existing TEXT APC fix does NOT automatically solve this; the multimodal
+interaction must be reproduced + pinned. Your align-mode expertise is directly applicable
+(likely necessary). Viable [Bugfix] PR.
+
+**Path to a defensible PR (you are best-positioned):**
+  1. Reproduce on Qwen3.6 multimodal stack: multi-turn, +1 image/turn, log num_cached_tokens (expect 0).
+  2. Pin the cause in kv_cache_utils.py block-alignment (align mode + mm-token offset divisibility break).
+  3. Fix; verify num_cached_tokens > 0 on warm turn (cold==warm methodology, now with images).
+  4. Post a VERIFIED diagnosis + tested fix on #43587 (NOT another speculative AI comment).
+  5. Branch off upstream/main, GPG-signed, fork-only, human reviews + runs CI before submit.
+
+**Next concrete step:** scaffold the repro + instrumented num_cached_tokens probe + draft branch
++ issue-comment draft (needs a GPU multimodal serve to actually run).
