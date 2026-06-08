@@ -1,3 +1,24 @@
+# GDN-APC — FINAL SUMMARY (long-context agentic, real measurements)
+
+## Verdict: prefix caching WORKS and is CORRECT; 1.66x e2e; bitwise base-parity is a
+## spec-decode property, not achievable (and not an APC corruption).
+
+- **Cache correct / KV stable:** cold==warm BITWISE over 11.8k-tok / 4-turn agentic (the
+  cache is transparent; no corruption over long context). [long_context_agentic.md]
+- **e2e:** DFlash+APC 20.25s vs base 33.71s = **1.66x** (APC +1.33x over DFlash spec).
+  [production_parity.md]
+- **Base bitwise parity:** NOT achievable. base vs DFlash-no-APC ALREADY diverges (verify-
+  forward near-tie numerics, cascades) -> a property of ALL spec decode, present without APC.
+  APC adds the benign align-vs-none mode numeric. All divergences are distributionally valid
+  (same-quality greedy continuations), NOT state corruption.
+- **Correctness foundation:** decoupled mamba_cache_mode from APC; cold==warm gate replaces
+  the confounded APC-on-vs-off gate. [GDN_APC_GATE_FIX.md]
+
+Config to run it: IMAGE=vllm-dflash-thor:ddtree, --enable-prefix-caching (auto align),
+--mamba-block-size 128, DFlash spec. TP=1. CUDA graphs capture.
+
+---
+
 # GDN-APC — summary (real results)
 
 Base: `vllm-dflash-thor:fa-native` = vLLM 0.20.0.dev0+dflash (prebuilt overlay; not nightly).
