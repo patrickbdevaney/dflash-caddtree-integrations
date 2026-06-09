@@ -1,0 +1,14 @@
+{
+  "label": "vllm_dllm_diff",
+  "model": "/models/LLaDA2.1-mini",
+  "avg_tok_s": 72.12,
+  "total_tokens": 768,
+  "total_time_s": 10.65,
+  "vs_hf_bf16_649": 1.111,
+  "vs_dflash_137": 0.526,
+  "samples": [
+    " using the \"expand around centers\" approach:\n\n```python\ndef longest_pic_substring(s):\n    \"\"\"\n    Find the longest pal a",
+    "Here's a complete implementation of a Binary Search Tree (BST) in Python with insert, search, and delete methods:\n\n```py",
+    " Python function to solve the coin change problem using dynamic programming:\n\n```python\ndef coin_change(coins, amount):\n"
+  ]
+}

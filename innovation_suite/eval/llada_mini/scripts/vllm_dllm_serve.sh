@@ -3,11 +3,14 @@
 # Attempt vLLM block-diffusion serving of LLaDA2.1-mini via the dllm-plugin (real LLaDA2ForCausalLM,
 # default) on our 0.20.0.dev0+dflash fork. Installs the plugin (deps=[], non-disruptive) at runtime.
 source $HOME/dflash-dev/gpu_run.sh
-NAME="$1"; MODEL="$2"; PORT="${3:-8011}"; MEMUTIL="${4:-0.6}"
+NAME="$1"; MODEL="$2"; PORT="${3:-8011}"; MEMUTIL="${4:-0.4}"
 LOG="/tmp/${NAME}.log"
 IMG="${LLADA_IMG:-vllm-dflash-thor:ddtree}"
+# strict serialization: refuse if a build or another serve is alive
+ALIVE=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E 'sglk_build|sglang_|vllm_dllm_' | grep -v "^${NAME}$" || true)
+if [ -n "$ALIVE" ]; then echo "[vllm_dllm_serve] ABORT: other memory-heavy containers alive: $ALIVE"; exit 1; fi
 gpu_run "$NAME" "$LOG" -- \
-  --runtime nvidia --ipc host --shm-size 16g -p ${PORT}:${PORT} \
+  --runtime nvidia --ipc host --shm-size 8g --memory 88g --memory-swap 88g -p ${PORT}:${PORT} \
   -v $HOME/models:/models -v $HOME/dflash-dev:/work \
   -e LD_PRELOAD=/usr/lib/aarch64-linux-gnu/nvidia/libcuda.so.1 \
   -e VLLM_PLUGINS=dllm -e VLLM_USE_V2_MODEL_RUNNER=1 -e VLLM_ENABLE_V1_MULTIPROCESSING=0 \

@@ -219,3 +219,15 @@ route via model_state.take_draft_token_ids + dllm_prefix_lengths field; do NOT b
 Full writeup: eval/llada_mini/vllm_diffusion_result.md. No tok/s reported (gen doesn't complete yet).
 Both serving paths now reduce to localized low-level issues: vLLM=1 Triton draft kernel; SGLang=aarch64
 sgl-kernel/torch ABI (sgl-kernel 0.3.21->torch 2.9.1 vs image 2.10.0; source-build in progress).
+
+## LLaDA2.1-mini vLLM block-diffusion GENERATES on our DFlash fork (2026-06-09) ✅
+Completed the vLLM diffusion port: blocked -> RFC -> server runs -> GENERATES at 72.1 tok/s (1.11x the
+raw-transformers BF16 floor 64.9; eager + TRITON_ATTN, headroom from CUDA graphs + flashinfer non-causal).
+Method: 3-way-merged dllm-fork-coherent's block-diffusion delta onto vLLM PR#40898 head (== :ddtree base,
+0-diff verified); +231/-40 across 14 files, PURE-PYTHON, gated on diffusion_config (AR/DFlash byte-identical).
+Overlaid onto :ddtree -> image vllm-dflash-thor:dllm in 0.6s (NO 90-min recompile, NO OOM). DiffusionConfig
+auto-detected -> num_bonus_tokens=0 fixes the _combine_sampled_and_draft_tokens_kernel OOB; custom_sampler
+denoise loop + dllm-plugin LLaDA2ModelState run. Output partially coherent w/ artifacts (plugin 2.0-style
+remasking on 2.1 weights + untuned params) — serving/throughput milestone, NOT an accuracy claim; tuning is
+future. Fork branch $HOME/vllm@diffusion-on-pr40898 (efd384973), pushed to origin for review (NOT vllm-project PR).
+OOM lesson applied throughout: strict serialization (one heavy job at a time) + cgroup --memory caps + mem-frac 0.4.

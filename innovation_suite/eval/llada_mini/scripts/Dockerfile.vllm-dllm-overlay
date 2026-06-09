@@ -1,0 +1,2 @@
+FROM vllm-dflash-thor:ddtree
+COPY vllm/ /opt/venv/lib/python3.12/site-packages/vllm/

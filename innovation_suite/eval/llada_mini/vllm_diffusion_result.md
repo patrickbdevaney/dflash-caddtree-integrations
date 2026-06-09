@@ -1,6 +1,10 @@
-# vLLM Block-Diffusion Serving of LLaDA2.1-mini on Thor — RUNS end-to-end; one precise kernel blocker
+# vLLM Block-Diffusion Serving of LLaDA2.1-mini on Thor — GENERATES (72.1 tok/s) ✅
 Date: 2026-06-09 · Hardware: Jetson AGX Thor SM110a / CUDA 13 / aarch64
-Fork: vLLM `0.20.0.dev0+dflash` (`:ddtree`) · Plugin: vllm-project/dllm-plugin @a6cb536
+Fork: vLLM `0.20.0.dev0+dflash` (`:ddtree`/`:dllm`) · Plugin: vllm-project/dllm-plugin @a6cb536
+> FINAL STATUS: blocked → RFC → server runs → **GENERATES at 72.1 tok/s** on our DFlash fork via a
+> gated 14-file pure-Python port (see the 2026-06-09 UPDATE at the bottom). The body below documents
+> the earlier "server runs but generation crashed in the combine kernel" stage and its root-cause —
+> kept for the record; the UPDATE supersedes the "remaining blocker" framing.
 
 ## Headline (overturns the earlier Stage-5 "blocked / RFC-only" conclusion)
 **The vLLM block-diffusion serving stack initializes and serves end-to-end on our DFlash fork.**
@@ -73,3 +77,35 @@ Both LLaDA2 serving paths on Thor now reduce to **localized low-level issues**, 
 
 No fabricated numbers: no tok/s is reported because generation does not yet complete. The milestone
 is that the stack **stands up and serves** on our fork — a large advance over "blocked".
+
+## UPDATE 2026-06-09 — vLLM block-diffusion now GENERATES on our DFlash fork ✅
+The gated port (vllm_diffusion_port_spec.md) was applied and it WORKS end-to-end.
+
+### What was done
+- 3-way-merged the dllm-fork-coherent block-diffusion delta onto **vLLM PR#40898 head** (== the exact
+  `:ddtree` DFlash-Thor image base; verified 0-diff vs the installed vllm). +231/-40, 14 files, all
+  **pure-Python** (no csrc). Branch: `$HOME/vllm@diffusion-on-pr40898` (commit efd384973). Gated on
+  diffusion_config (None=AR/DFlash byte-identical).
+- Because it's pure-Python, **overlaid the 14 files onto `:ddtree` -> image `vllm-dflash-thor:dllm`
+  in 0.6 s (NO 90-min recompile, NO OOM risk).**
+- Served LLaDA2.1-mini on `:dllm` via dllm-plugin (real LLaDA2ForCausalLM, DllmRuntimeScheduler/Worker,
+  V2 runner), TP=1, --enforce-eager, --attention-backend TRITON_ATTN, gpu-mem 0.4, cgroup --memory 88g,
+  ALONE (strict serialization). Auto-detected: `DiffusionConfig(draft_length=32)` -> _num_bonus_tokens=0.
+
+### Result
+- **Generation succeeds — no crash.** The `_combine_sampled_and_draft_tokens_kernel` OOB illegal-access
+  is fixed (num_bonus_tokens=0); the custom_sampler denoise loop runs.
+- **Throughput: 72.1 tok/s** avg (87.3 / 78.7 / 57.3 across 3 coding prompts), max-tokens 256, T=0,
+  eager. = **1.11× the raw-transformers BF16 floor (64.9)**, 0.53× DFlash-137. GPU util peaked ~90%.
+  Headroom remains: eager (no CUDA graphs) + TRITON_ATTN (not flashinfer non-causal).
+- **Output quality: partially coherent with artifacts** (e.g. `def longest_pic_substring`, dropped
+  `def`, duplicated arg lines). Attributable to: the dllm-plugin implements **2.0-style remasking** but
+  the weights are **2.1** (which expects token-editing); plus untuned diffusion params (block/threshold/
+  steps) and TRITON_ATTN non-causal vs flashinfer. NOT production-quality text yet — this is a
+  serving/throughput milestone, not an accuracy claim. Tuning + 2.1 editing remasking is future work.
+
+### Honest standing
+vLLM LLaDA2 block-diffusion serving went **blocked → RFC → server runs → GENERATES (72.1 tok/s)** on
+our DFlash fork, via a gated 14-file pure-Python port (DFlash AR path preserved). The remaining work is
+output-quality tuning (2.1 editing remasking, params, flashinfer non-causal, CUDA graphs), not basic
+viability. Branch left for review (not PR'd to vllm-project per AGENTS.md). bench: benchmarks/vllm_dllm_diff.json.
