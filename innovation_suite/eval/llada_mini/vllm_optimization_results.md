@@ -17,3 +17,31 @@ lever only on a profound sm_110 wall. tok/s = sglang_bench_client (3 coding prom
 
 ## RECOMMENDED tuned config (so far): vLLM dllm-plugin, BF16, **--attention-backend FLASHINFER + DiffusionConfig commit_threshold=0.55**, eager, TP=1 = **90.7 tok/s** (1.40× the 64.9 raw-transformers floor; 1.26× the eager/TRITON_ATTN 72.1), coherent output. commit_threshold is the dominant single-stream lever (0.9→0.55 = +24%).
 | **V3-retry NVFP4 + patched loader** | loads, decode ≪1 tok/s | — | ⚠️ **loader FIX worked; decode impractically slow at concurrency-1**. Patched dllm-plugin `models/llada2.py` load_weights to map compressed-tensors NVFP4 expert params ({gate,up,down}_proj.{weight_packed,weight_scale,weight_global_scale,input_global_scale} → FusedMoE w13_/w2_+suffix, shards w1/w3/w2). Now loads past "Missing weights", "VLLM_CUTLASS NvFp4 MoE backend" active, startup complete, weights ~10GB (vs 30GB BF16), KV 31.7GiB. BUT generation didn't complete 16 tokens in ~280s (GPU 26-33% — not saturated): the CUTLASS FP4 **grouped-GEMM is throughput-oriented and starves at concurrency-1's tiny batch** (~32 tok/forward). NVFP4 is a MEMORY win, not a concurrency-1 speed win here. Motivates the low-concurrency MoE benchmark below. (Loader patch is real + reusable; the FP4-at-small-batch slowness is the kernel's regime, not the loader.) |
+
+## Low-concurrency MoE benchmark (our usage profile — concurrency 1)
+`benchmark_moe.py` (NO --tune; **default** config — the one the serve actually uses), LLaDA2 MoE
+(E=256, top-8, N=512, hidden 2048), bf16, sm_110a. Batch = tokens routed per forward; concurrency-1
+diffusion-block decode ≈ 32 tokens/forward.
+
+| Batch (tok/fwd) | MoE kernel time | Per-token | Default config |
+|---:|---:|---:|---|
+| 1  | 314.8 µs  | 314.8 µs | M16,N64,K128,GROUP1,warps4,stages4 |
+| 8  | 1873.7 µs | 234.2 µs | M16,N64,K128,warps4,stages4 |
+| 16 | 2892.2 µs | 180.8 µs | M16,N64,K128,warps4,stages4 |
+| **32** | **4570.0 µs** | **142.8 µs** | M16,N64,K128,warps4,stages4 |
+| 64 | 6266.7 µs | 97.9 µs  | M32,N64,K128,warps4,stages3 |
+
+**Takeaways (why the threshold/speed-mode win works):** per-token MoE GEMM cost drops **2.2×** from
+batch-1 (314.8 µs) to batch-32 (142.8 µs) and **3.2×** to batch-64 (97.9 µs). Single-stream diffusion
+decode is MoE-GEMM-bound, and committing more tokens per denoise step (lower commit_threshold) raises
+the effective batch → cheaper per token — this is the mechanism behind V6a (thr 0.55 = 90.7 tok/s). It
+also confirms draft_length=64 would amortize better (97.9 µs/tok) **if** the plugin worker block size
+matched (VLLM_DLLM_DRAFT_SIZE=64). All times are on the **default** (untuned) config — a tuned Thor
+config would lower them further, but see below.
+
+**MoE autotune (--tune) could not complete on this Thor:** `benchmark_moe --tune` searches 1920 kernel
+configs and has **no per-config timeout**; the tail configs (max num_warps/num_stages) run 12–16 s each
+and effectively hang, stalling both the full sweep and the small-batch (1/8/16/32/64) run at ~96–97%
+before the tuned config is written. So the Thor MoE config can't be produced via this tool as-is — it
+would need a per-config timeout patch (upstream limitation). The default config + the threshold/attention
+tuning is what delivers the 90.7 tok/s recommended result.
