@@ -1,3 +1,14 @@
+LongRoPE2 eval 2026-06-09: full LongRoPE2 = search+fine-tune (OUT OF SCOPE). Inference-time
+LongRoPE-approx (cache-surgery, rotary_dim=64) vs std-RoPE baseline: 5.16@512k / 5.10@1M vs
+std-RoPE 5.07 / 5.03 -> CLOSE but does NOT beat std-RoPE (far better than DroPE 7.x though).
+YaRN blocked by a vLLM rotary shape bug on Qwen3_5Moe (get_rope rope_parameters injection;
+hf_overrides ignored due to nested text_config). CONCLUSION: no inference-time RoPE method beats
+std-RoPE on this GDN hybrid -> GDN recurrent layers are self-sufficient at long context; only
+training-based extension would improve. vLLM PR: rope_type infra only, NOT a quality claim.
+Next: std-RoPE NIAH baseline @1M (does std RoPE retrieve too?) + recalibrated training (both
+future). Engineering win of the session: gpu_run.sh guard (flock+named+watchdog+drop_caches)
+made ~10 dead-end iterations cost minutes each instead of the earlier 6h wedge.
+
 INCIDENT + RESUME (2026-06-08): A container-contention mistake (I launched the LongPPL disc
 phase TWICE; the duplicate docker runs fought for the GPU -> "Created" stalls) cost ~6h, and the
 subsequent force-kills left the docker/nvidia runtime WEDGED (docker commands hang, new containers
