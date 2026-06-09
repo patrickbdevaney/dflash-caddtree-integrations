@@ -16,7 +16,7 @@ gpu_run "$NAME" "$LOG" -- \
   bash -lc "/opt/venv/bin/pip install -q ray 2>&1 | tail -2; \
     BM=/build/vllm/benchmarks/kernels/benchmark_moe.py; \
     sed -i 's/        \"Qwen3NextForCausalLM\",/        \"Qwen3NextForCausalLM\",\n        \"LLaDA2MoeModelLM\",/' \$BM && echo '[patch] added LLaDA2MoeModelLM to get_model_params'; \
-    /opt/venv/bin/python \$BM --model /models/LLaDA2.1-mini --trust-remote-code --tune --tp-size 1 --dtype auto"
+    /opt/venv/bin/python \$BM --model /models/LLaDA2.1-mini --trust-remote-code --tune --tp-size 1 --dtype auto ${MOE_BATCHES:+--batch-size ${MOE_BATCHES}}"
 rc=$?; echo "[moe_tune] gpu_run rc=$rc"
 if [ $rc -eq 0 ]; then ec=$(gpu_wait "$NAME"); echo "[moe_tune] exit=$ec"; gpu_stop "$NAME"; fi
 echo "=== produced configs ==="; ls -la $HOME/dflash-dev/llada_mini/out/moe_configs/ 2>/dev/null | grep -i json | head
