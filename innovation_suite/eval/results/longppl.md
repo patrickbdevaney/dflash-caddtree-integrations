@@ -43,3 +43,37 @@ align the perplexity story with the 1M NIAH retrieval result. (Offered; not yet 
 - Qwen3-14B-NVFP4 (compressed-tensors, full attn, 40k): works; same-vendor; smaller window.
 - **Llama-3.1-8B-Instruct bf16 (128k): USED** — bf16 (no quant block), full attn, cross-vendor,
   recognized arch, 128k window. The correct discriminator.
+
+---
+## UPDATE 2026-06-09: full 288k / 512k / 1M sweep — DroPE does NOT help (negative result)
+
+GovReport corpus (~1.2M tok), Llama-3.1-8B bf16 disc @128k (reused key-mask), Qwen3.6 DroPE
+on/off, prompt_logprobs with max_num_batched_tokens=8192 (logits-chunk cap -> no OOM at 1M).
+
+| Context | DroPE-on far-PPL | DroPE-off (std RoPE) far-PPL | far tokens |
+|---------|------------------|------------------------------|-----------|
+| 288k (1.1x) | 5.23 | 4.18 | 25,840 |
+| 512k (2x)   | 7.11 | 5.07 | 249,840 |
+| 1M (4x)     | 7.07 | 5.03 | 646,580 |
+LongPPL (key tokens <128k) = ~1.252 for all (on==off; causal-insensitive -> pipeline validated).
+
+### Conclusion (honest, negative)
+1. Inference-time DroPE (NO recalibration) WORSENS long-context perplexity at every scale; the
+   gap is large and stable (DroPE-on ~7.1 vs std-RoPE ~5.0 from 512k on). Both PLATEAU.
+2. Standard RoPE does NOT catastrophically break at 4x native on this GDN-hybrid (plateaus ~5.0,
+   ~26% degenerate = normal). The GDN recurrent layers carry long context, so the attention
+   layers' OOD RoPE at 1M is non-catastrophic.
+3. IMPLICATION FOR THE 1M NIAH: it was DroPE-ON only; NO standard-RoPE baseline was run. This
+   PPL evidence strongly suggests std RoPE would ALSO retrieve at 1M (better PPL, no collapse),
+   so the NIAH DroPE result is likely NOT DroPE-specific.
+
+### PR IMPACT (important)
+The DroPE [Feature] PR (pr/drope-rope-type) value claim ("improves long-context") is NOT
+supported by this evidence and is in fact contradicted on the perplexity dimension. DO NOT
+submit the DroPE feature claim as a quality improvement. The rope_type implementation + the
+20/20 bitwise graph-safe gate remain valid as INFRASTRUCTURE, but reframe as an optional
+extension mechanism, NOT a quality win. Required before any DroPE quality claim:
+  (a) standard-RoPE (DroPE-off) S-NIAH @1M baseline — does std RoPE retrieve too? (Tier 1)
+  (b) RECALIBRATED DroPE (literature: DroPE needs continued-pretraining to help; we ran
+      zero-shot inference-time = the baseline that the paper says underperforms).
+This LongPPL eval did its job: it caught a result retrieval-only would have misrepresented.
