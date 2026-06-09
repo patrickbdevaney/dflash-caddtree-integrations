@@ -16,12 +16,18 @@ MODEL = os.environ.get("SRC_MODEL", "/models/LLaDA2.1-mini")
 SAVE_DIR = os.environ.get("DST_MODEL", "/models/LLaDA2.1-mini-NVFP4")
 assert SAVE_DIR.startswith("/models"), SAVE_DIR
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from datasets import load_dataset
 
-print(f"[quant] loading {MODEL}", flush=True)
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL, trust_remote_code=True, torch_dtype="auto", device_map="cuda")
+# The official modeling_llada2_moe.py imports create_bidirectional_mask from
+# transformers.masking_utils, absent in this image's transformers 4.57.3. Load via
+# S2D2's self-contained modeling (proven to load these weights in the benchmark).
+print(f"[quant] loading {MODEL} via S2D2 modeling", flush=True)
+sys.path.insert(0, "/work/S2D2/LLaDA2")
+from configuration_llada2_moe import LLaDA2MoeConfig
+from modeling_llada2_moe_cache import LLaDA2MoeModelLM
+cfg = LLaDA2MoeConfig.from_pretrained(MODEL)
+model = LLaDA2MoeModelLM.from_pretrained(MODEL, config=cfg, torch_dtype="auto", device_map="cuda")
 tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
 
 # all-expert calibration if llm-compressor exposes a generic linearizer
@@ -34,22 +40,22 @@ except Exception as e:
     print("[quant] proceeding with activated-expert calibration (quality risk on cold experts)", flush=True)
 
 print("[quant] building calibration set (wikitext-2, 64x256)", flush=True)
+from datasets import Dataset
 ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-samples = []
-for item in ds:
-    t = item["text"].strip()
-    if len(t) > 80:
-        samples.append(tokenizer(t, return_tensors="pt", max_length=256, truncation=True))
-        if len(samples) >= 64:
-            break
-print(f"[quant] {len(samples)} calibration samples", flush=True)
+texts = [it["text"].strip() for it in ds if len(it["text"].strip()) > 80][:64]
+# pre-tokenize to input_ids ONLY (no attention_mask): LLaDA2's diffusion forward rejects
+# the standard 2D (B,S) mask and builds its own bidirectional block mask when mask is None.
+enc = [tokenizer(t, max_length=256, truncation=True)["input_ids"] for t in texts]
+samples = Dataset.from_dict({"input_ids": enc})
+print(f"[quant] {len(samples)} calibration samples (input_ids only, no attn mask)", flush=True)
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import QuantizationModifier
 
 recipe = QuantizationModifier(targets="Linear", scheme="NVFP4", ignore=["lm_head"])
 print("[quant] running oneshot NVFP4 ...", flush=True)
-oneshot(model=model, dataset=samples, recipe=recipe,
+# pass processor=tokenizer directly: oneshot can't re-init a trust_remote_code processor
+oneshot(model=model, dataset=samples, recipe=recipe, processor=tokenizer,
         max_seq_length=256, num_calibration_samples=len(samples))
 
 print(f"[quant] saving -> {SAVE_DIR}", flush=True)

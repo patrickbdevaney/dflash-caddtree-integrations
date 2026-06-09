@@ -159,3 +159,31 @@ FP8 KV under the default FlashInfer backend CRASHES on the Qwen GDN hybrid:
 (flashinfer.py:1739) — the same kv_cache_sf API mismatch the 122B serve script documents.
 So FP8 KV is blocked by FlashInfer here, BEFORE the calc_kv_scales corruption question.
 Workaround under test: --attention-backend TRITON_ATTN (bf16-ref + fp8-calc + fp8-scale1.0).
+
+## LLaDA2.1-mini Maximum-Speed Stack (2026-06-09)
+Model: inclusionAI/LLaDA2.1-mini — 16B MoE, ~1.4B active, llada2_moe (20L, 256E×8). Ran in
+vllm-dflash-thor:latest via gpu_run guard (zero stuck containers all session).
+- RAW CEILING (BF16): **64.9 tok/s = cached_speed** (KV-cache decode). KV cache = ~1.6x over the
+  static block-diffusion baseline (38.9->61.2 quality, 30.5->64.9 speed).
+- **S2D2 self-speculation did NOT help** at these settings (34-40 tok/s): verification passes add
+  ~40-60% NFEs (tok/NFE 5.0-5.8 vs cached 8.1), and Thor is forward-bound. Paper's 4.4x is
+  accuracy-matched vs static baseline on full evals/long gens — different axis, not claimed.
+- **NVFP4 quantization SUCCEEDED**: 9.5GB (3.4x smaller), nvfp4-pack-quantized; key fix was
+  input_ids-only calibration to dodge LLaDA2's bidirectional-mask rejection of llm-compressor's
+  2D mask. But raw-transformers decode is **impractical** (CPU-bound dequant, GPU 28%, 256-tok
+  nocache >4min, aborted) -> BF16 is the speed choice; NVFP4 belongs to the fused-kernel serving
+  path. Calibration caveat: activated-expert only (cold-expert quality risk).
+- **vLLM diffusion serving BLOCKED**: needs AlonKellner dllm-fork-coherent (non-causal attn +
+  draft buffers + slot remap); base vLLM = causal/wrong. dllm-plugin = MOCK model (Phase 7).
+  Official modeling also won't import on transformers 4.57.3 (create_bidirectional_mask). RFC:
+  pr_drafts/vllm_diffusion_lm_rfc.md (infra only, no quality claim).
+- **SGLang** = most mature dLLM path, supports Thor (Apr-2026, arch 11.0a) + SGLang-Diffusion,
+  but native dLLM "not production-stable"; full serve NOT run (fallback, Triton-risk). Highest-
+  probability next step for SERVING LLaDA2.x on Thor.
+- **FP8 KV**: valid (GQA, 4 KV heads, ~halves KV), but serving-gated (same blocker as vLLM).
+- **Draft head**: DFlash/DFlare use diffusion-as-DRAFTER for AR targets (5.46x). Draft head FOR a
+  diffusion target is inverted/under-explored and speed-contraindicated here (Stage-4 evidence);
+  DFlare-style skeleton written, training deferred (multi-day).
+Next sessions: (1) SGLang-Diffusion serve on Thor (build arch 11.0a) — the real serving unlock;
+(2) dInfer standalone engine for LLaDA2.1-mini + NVFP4; (3) all-expert NVFP4 recalibration for
+the serving path. Models in $HOME/models owned by patrickd.

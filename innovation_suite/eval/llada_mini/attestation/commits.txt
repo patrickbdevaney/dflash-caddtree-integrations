@@ -1,0 +1,9 @@
+# LLaDA2.1-mini run attestation — 2026-06-09
+host: Linux 6.8.12-tegra aarch64
+model_src: inclusionAI/LLaDA2.1-mini (BF16, 31G)
+model_nvfp4: /home/patrickd/models/LLaDA2.1-mini-NVFP4 (9.5G, nvfp4-pack-quantized)
+image: vllm-dflash-thor:latest (torch 2.10.0, transformers 4.57.3, vllm 0.20.0.dev0+dflash)
+S2D2: 66ef72d6850f2e52ade61ac8dd9a93c9047ae39b
+Fast-dLLM: a9b81e4caa240c8cad4f7dc1889ff4852a0fca5b
+dInfer: 1ffeb961cd258bede74fcf5ca8a416ae6d57b18f
+dllm-plugin: a6cb53680688cbea484949cff37bcf70db795929
