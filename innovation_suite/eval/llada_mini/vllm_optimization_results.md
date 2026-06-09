@@ -45,3 +45,23 @@ and effectively hang, stalling both the full sweep and the small-batch (1/8/16/3
 before the tuned config is written. So the Thor MoE config can't be produced via this tool as-is — it
 would need a per-config timeout patch (upstream limitation). The default config + the threshold/attention
 tuning is what delivers the 90.7 tok/s recommended result.
+
+**Honest bottom line on the MoE config lever:** it produced **no decode speedup** — the autotune never
+completed, so no tuned config was baked or benched. The 90.7 tok/s is entirely flashinfer + commit_threshold
+0.55; the per-batch MoE benchmark above is diagnostic only. The MoE lever is **quantified but unrealized**.
+
+### To complete the MoE autotune (the tuner patch — documented, NOT run; deferred)
+`benchmark_moe.py --tune` benchmarks each of 1920 kernel configs serially with no time bound; the tail
+configs (`num_stages` 4–5 × `num_warps` 8 × large `BLOCK_*`) take 12–16 s and effectively hang on sm_110,
+stalling at ~96–97% before `save_configs()` writes the JSON. Two ways to make it finish:
+1. **Per-config timeout** — wrap the per-config benchmark dispatched to the Ray `BenchmarkWorker` with
+   `ray.get(..., timeout=T)` (T≈3 s) in `benchmark_moe.py`'s `tune()` loop and treat `GetTimeoutError` as
+   `float("inf")` so the config is skipped, not blocking. ~10 lines.
+2. **Prune the grid** — in `get_configs_compute_bound()` drop the slow tail (`num_stages<=3`,
+   `num_warps<=4`); these hang and are rarely optimal at our small batches anyway. Cuts the grid to a
+   fast subset that completes in minutes.
+After either patch: rerun `launch_moe_tune.sh` (writes `E=256,N=512,device_name=NVIDIA_Thor.json`), bake
+into `:dllm-moe` (`FROM vllm-dflash-thor:dllm`, COPY the JSON into `.../fused_moe/configs/`), serve BF16
+`EAGER=1 ATTN_BACKEND=FLASHINFER DIFF_THRESHOLD=0.55`, confirm the "sub-optimal MoE config" warning is
+gone, and bench vs 90.7. Expected upside is bounded (the default config is reasonable; per-token cost is
+dominated by batch size, which the threshold lever already exploits) — hence deferred, not pursued.
