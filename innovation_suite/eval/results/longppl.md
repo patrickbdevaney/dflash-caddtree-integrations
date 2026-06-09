@@ -77,3 +77,40 @@ extension mechanism, NOT a quality win. Required before any DroPE quality claim:
   (b) RECALIBRATED DroPE (literature: DroPE needs continued-pretraining to help; we ran
       zero-shot inference-time = the baseline that the paper says underperforms).
 This LongPPL eval did its job: it caught a result retrieval-only would have misrepresented.
+
+---
+## UPDATE 2026-06-09: LongRoPE (+YaRN attempt) vs std-RoPE — NEGATIVE result
+
+Goal: beat std-RoPE far-PPL (5.07@512k, 5.03@1M) with LongRoPE2. Same corpus/disc/methodology.
+
+### Scope (honest)
+- Full LongRoPE2 (arXiv:2502.20082) = evolutionary search for per-dim factors + mixed-context
+  WEIGHT FINE-TUNING (~10B tokens). Both training-scale -> OUT OF SCOPE (no-train program).
+- Ran the INFERENCE-TIME approximation only (no search, no fine-tune): the LongRoPE2 step
+  function — undertrained low-freq dims (wavelength>=native) interpolated by target/native,
+  well-trained high-freq dims kept (short_factor=1 within native -> within-native lossless).
+- YaRN: BLOCKED — config-injection (hf_overrides) ignored (rope in nested text_config); direct
+  get_rope rope_parameters injection hit a vLLM rotary shape bug on Qwen3_5Moe
+  ("query, key and positions must have the same batch_size and seq_len"). Documented, not run.
+- LongRoPE applied via CACHE SURGERY (the proven DroPE mechanism): rebuild cos/sin cache rows
+  >= native with the step-scaled inv_freq; standard rotary forward (works). rotary_dim=64
+  (partial rotary), factors self-computed from the actual cache dim.
+
+### Results (far-region PPL, tokens > native 262144)
+| Context | std-RoPE | LongRoPE-approx | DroPE |
+|---------|----------|-----------------|-------|
+| 288k (1.1x) | 4.18 | 4.58 (@270k) | 5.23 |
+| 512k (2x)   | 5.07 | 5.16 (@490k)  | 7.11 |
+| 1M (4x)     | 5.03 | 5.10 (@980k)  | 7.07 |
+LongPPL key-token (<128k) validation: 1.249-1.252 (== std-RoPE; pipeline valid) for all.
+
+### Conclusion (NEGATIVE — and publishable)
+std-RoPE wins at EVERY scale. LongRoPE-approx is very close (+0.07..+0.09) and FAR better than
+DroPE (preserving positional signal beats removing it), but does NOT beat plain std-RoPE. All
+plateau. Combined with the DroPE negative, this is consistent evidence that **GDN-hybrid
+recurrent architectures are self-sufficient at long context: the recurrent layers carry the
+long-range signal, std-RoPE OOD at 4x native is non-catastrophic (~5.0 PPL), and inference-time
+RoPE manipulation (removal=DroPE or non-uniform rescale=LongRoPE) does NOT improve — at best
+matches-minus-epsilon — long-context generation quality.** Only TRAINING-based extension
+(full LongRoPE2 search + fine-tune) is predicted to improve it. No vLLM [Feature] PR is
+justified as a quality claim for this model; the rope_type implementations remain infrastructure.
