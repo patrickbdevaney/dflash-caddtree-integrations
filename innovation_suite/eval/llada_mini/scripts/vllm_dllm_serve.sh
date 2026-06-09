@@ -12,6 +12,11 @@ EAGER_FLAG="--enforce-eager"
 [ "${EAGER:-1}" = "0" ] && EAGER_FLAG="--cudagraph-capture-sizes 32 64 96 128"
 # optional MoE backend override (e.g. flashinfer_cutlass, triton); default auto
 MOE_FLAG=""; [ -n "${MOE_BACKEND}" ] && MOE_FLAG="--moe-backend ${MOE_BACKEND}"
+# optional DiffusionConfig override (V6 param tuning): commit_threshold (speed mode), draft_length
+DIFF_KWARGS=""
+[ -n "${DIFF_THRESHOLD}" ] && DIFF_KWARGS="commit_threshold=${DIFF_THRESHOLD}"
+[ -n "${DIFF_DRAFT}" ] && DIFF_KWARGS="${DIFF_KWARGS:+${DIFF_KWARGS}, }draft_length=${DIFF_DRAFT}"
+export DIFF_KWARGS
 # strict serialization: refuse if a build or another serve is alive
 ALIVE=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E 'sglk_build|sglang_|vllm_dllm_' | grep -v "^${NAME}$" || true)
 if [ -n "$ALIVE" ]; then echo "[vllm_dllm_serve] ABORT: other memory-heavy containers alive: $ALIVE"; exit 1; fi
@@ -28,6 +33,7 @@ gpu_run "$NAME" "$LOG" -- \
     /opt/venv/bin/pip install /work/dllm-plugin 2>&1 | tail -3; \
     FI=/opt/venv/lib/python3.12/site-packages/vllm/v1/attention/backends/flashinfer.py; \
     sed -i 's/kv_cache_sf=kv_cache_sf,/**({\"kv_cache_sf\": kv_cache_sf} if kv_cache_sf is not None else {}),/g' \$FI && echo '[patch] flashinfer kv_cache_sf made conditional'; \
+    DC='${DIFF_KWARGS}'; if [ -n \"\$DC\" ]; then VC=/opt/venv/lib/python3.12/site-packages/vllm/config/vllm.py; sed -i \"s/self.diffusion_config = DiffusionConfig()/self.diffusion_config = DiffusionConfig(\$DC)/\" \$VC && echo \"[patch] DiffusionConfig(\$DC)\"; fi; \
     /opt/venv/bin/vllm serve $MODEL \
       --trust-remote-code --max-model-len 2048 --max-num-seqs 4 \
       --attention-backend ${ATTN_BACKEND:-TRITON_ATTN} $MOE_FLAG \
