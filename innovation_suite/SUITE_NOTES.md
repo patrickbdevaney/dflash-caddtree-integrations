@@ -187,3 +187,17 @@ vllm-dflash-thor:latest via gpu_run guard (zero stuck containers all session).
 Next sessions: (1) SGLang-Diffusion serve on Thor (build arch 11.0a) — the real serving unlock;
 (2) dInfer standalone engine for LLaDA2.1-mini + NVFP4; (3) all-expert NVFP4 recalibration for
 the serving path. Models in $HOME/models owned by patrickd.
+
+## LLaDA2.1-mini viability research + roadmap (2026-06-09, addendum)
+3-thread research (eval/llada_mini/RESEARCH_ROADMAP.md). KEY CORRECTION to the Stage-5 RFC:
+dllm-plugin's REAL LLaDA2ForCausalLM is registered BY DEFAULT (mock is VLLM_DLLM_USE_MOCK_MODEL=1),
+and our 0.20.0.dev0+dflash fork already has ~80% of the diffusion infra (MRV2 ModelState,
+draft_tokens buffer, use_non_causal in config/attention + spec_decode/dflash). => vLLM diffusion
+serving is a ~250-400 LOC port (A2: rebase dllm-fork-coherent delta onto our fork), NOT blocked.
+Critical path: (1) port delta -> serve LLaDA2.1-mini via dllm-plugin (TP=1, FlashInfer non-causal);
+(2) flip to our 9.5GB NVFP4 artifact -> plugin threads quant_config into FusedMoE -> CUTLASS FP4
+grouped GEMM (the kernel our 122B run already proved on Thor) => NVFP4 finally pays off; (3) re-test
+gated S2D2 (score_threshold + soft_entropy, gen 512) + scope d3LLM distillation for tokens/forward.
+S2D2 honest ceiling here = break-even to +15% (training-free spec can't beat KV-cache on a forward-
+bound device); durable wins are fused kernels + distillation (d3LLM ~9.91 tok/forward @ bs1). dInfer
+LLaDA2 quant = FP8 (ModelOpt), NOT NVFP4; standalone dInfer+SGLang is the fallback w/ native 2.1 editing.

@@ -10,10 +10,20 @@ LLaDA2.1-mini "as-is" through vLLM therefore produces **causal (wrong) attention
 incorrect output, even when the weights load.
 
 ## What the ecosystem actually provides (June 2026, verified)
+> **CORRECTION (2026-06-09, after deep repo read — supersedes the line below):** the plugin's
+> **real `LLaDA2ForCausalLM` is registered BY DEFAULT** (`dllm_plugin/__init__.py:108-122`,
+> `config.py:124` → `dllm_plugin.models.llada2:LLaDA2ForCausalLM`, 892 LOC real 256-expert
+> FusedMoE + block-diffusion ModelState + non-causal attention backend). The **mock is opt-in**
+> via `VLLM_DLLM_USE_MOCK_MODEL=1`. The README's "production in progress" is stale wording —
+> Phase 7 is shipped. AND our `0.20.0.dev0+dflash` fork already has ~80% of the required infra
+> (MRV2 ModelState, `draft_tokens` buffer, `use_non_causal` in config/attention + spec_decode/dflash);
+> the gap is ~250–400 LOC of denoise-loop wiring. **So this is NOT blocked — it is a bounded port.**
+> Full plan: `eval/llada_mini/RESEARCH_ROADMAP.md` (Thread 3, option A2). The text below is the
+> original (pre-correction) assessment, kept for provenance.
+
 1. **vllm-project/dllm-plugin** (@a6cb536) — the official vLLM plugin path for dLLMs.
-   - Registers two architecture names with `ModelRegistry`, but **by default to a MOCK
-     model** (`dllm_plugin.models.mock_llada2`); production LLaDA2.0 logic is "Phase 7,
-     in progress" (docs/ROADMAP.md).
+   - Registers two architecture names with `ModelRegistry`, ~~by default to a MOCK model~~
+     (CORRECTED above: real model is default; mock is `VLLM_DLLM_USE_MOCK_MODEL=1`).
    - **Requires a dedicated vLLM fork** `AlonKellner-RedHat/vllm:dllm-fork-coherent`, which
      adds: non-causal attention (`use_non_causal` for FlashInfer), draft-token GPU buffer
      writes, and slot-mapping remap for first-block recompute. The README is explicit:
