@@ -5,7 +5,13 @@
 source $HOME/dflash-dev/gpu_run.sh
 NAME="$1"; MODEL="$2"; PORT="${3:-8011}"; MEMUTIL="${4:-0.4}"
 LOG="/tmp/${NAME}.log"
-IMG="${LLADA_IMG:-vllm-dflash-thor:ddtree}"
+IMG="${LLADA_IMG:-vllm-dflash-thor:dllm}"
+# EAGER=1 (default) keeps --enforce-eager; EAGER=0 enables CUDA graphs (uniform-batch)
+EAGER_FLAG="--enforce-eager"
+# EAGER=0 -> CUDA graphs; diffusion draft_length=32 needs capture sizes that are multiples of 32
+[ "${EAGER:-1}" = "0" ] && EAGER_FLAG="--cudagraph-capture-sizes 32 64 96 128"
+# optional MoE backend override (e.g. flashinfer_cutlass, triton); default auto
+MOE_FLAG=""; [ -n "${MOE_BACKEND}" ] && MOE_FLAG="--moe-backend ${MOE_BACKEND}"
 # strict serialization: refuse if a build or another serve is alive
 ALIVE=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E 'sglk_build|sglang_|vllm_dllm_' | grep -v "^${NAME}$" || true)
 if [ -n "$ALIVE" ]; then echo "[vllm_dllm_serve] ABORT: other memory-heavy containers alive: $ALIVE"; exit 1; fi
@@ -24,8 +30,8 @@ gpu_run "$NAME" "$LOG" -- \
     sed -i 's/kv_cache_sf=kv_cache_sf,/**({\"kv_cache_sf\": kv_cache_sf} if kv_cache_sf is not None else {}),/g' \$FI && echo '[patch] flashinfer kv_cache_sf made conditional'; \
     /opt/venv/bin/vllm serve $MODEL \
       --trust-remote-code --max-model-len 2048 --max-num-seqs 4 \
-      --attention-backend ${ATTN_BACKEND:-TRITON_ATTN} \
-      --gpu-memory-utilization $MEMUTIL --enforce-eager --no-async-scheduling \
+      --attention-backend ${ATTN_BACKEND:-TRITON_ATTN} $MOE_FLAG \
+      --gpu-memory-utilization $MEMUTIL $EAGER_FLAG --no-async-scheduling \
       --scheduler-cls dllm_plugin.runtime_scheduler.DllmRuntimeScheduler \
       --worker-cls dllm_plugin.runtime_worker.DllmRuntimeWorker \
       --host 0.0.0.0 --port $PORT"
