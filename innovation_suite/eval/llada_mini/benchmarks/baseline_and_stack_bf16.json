@@ -1,0 +1,136 @@
+{
+  "nocache_quality": {
+    "avg_tok_s": 38.92,
+    "total_tokens": 768,
+    "total_time_s": 19.73,
+    "total_nfe": 74,
+    "tok_per_nfe": 10.378,
+    "vs_dflash137": 0.284,
+    "fn": "generate",
+    "config": {
+      "threshold": 0.7,
+      "editing_threshold": 0.5,
+      "max_post_steps": 16
+    },
+    "sample_outputs": [
+      "Here are several Python implementations to find the longest palindromic substring:\n\n## Method 1: Exp",
+      "Here's a complete implementation of a Binary Search Tree (BST) in Python with insert, search, and de",
+      "Here's a comprehensive Python solution for the coin change problem using dynamic programming:\n\n```py"
+    ]
+  },
+  "nocache_speed": {
+    "avg_tok_s": 30.51,
+    "total_tokens": 768,
+    "total_time_s": 25.18,
+    "total_nfe": 101,
+    "tok_per_nfe": 7.604,
+    "vs_dflash137": 0.223,
+    "fn": "generate",
+    "config": {
+      "threshold": 0.5,
+      "editing_threshold": 0.0,
+      "max_post_steps": 0
+    },
+    "sample_outputs": [
+      "Here are several Python implementations to find the longest palindromic substring:\n\n## Method 1: Exp",
+      "Here's a complete implementation of a Binary Search Tree (BST) in Python with insert, search, and de",
+      "Here's a comprehensive Python solution for the coin change problem using dynamic programming:\n\n```py"
+    ]
+  },
+  "cached_quality": {
+    "avg_tok_s": 61.23,
+    "total_tokens": 768,
+    "total_time_s": 12.54,
+    "total_nfe": 94,
+    "tok_per_nfe": 8.17,
+    "vs_dflash137": 0.447,
+    "fn": "generate_cached",
+    "config": {
+      "threshold": 0.7,
+      "editing_threshold": 0.5,
+      "max_post_steps": 16
+    },
+    "sample_outputs": [
+      "Here's a Python function that finds the longest palindromic substring using the \"expand around cente",
+      "Here's a complete implementation of a Binary Search Tree (BST) in Python with insert, search, and de",
+      "Here's a comprehensive Python solution for the coin change problem using dynamic programming:\n\n```py"
+    ]
+  },
+  "cached_speed": {
+    "avg_tok_s": 64.93,
+    "total_tokens": 768,
+    "total_time_s": 11.83,
+    "total_nfe": 95,
+    "tok_per_nfe": 8.084,
+    "vs_dflash137": 0.474,
+    "fn": "generate_cached",
+    "config": {
+      "threshold": 0.5,
+      "editing_threshold": 0.0,
+      "max_post_steps": 0
+    },
+    "sample_outputs": [
+      "Here are several Python implementations to find the longest palindromic substring:\n\n## Method 1: Exp",
+      "Here's a complete implementation of a Binary Search Tree (BST) in Python with insert, search, and me",
+      "Here's a comprehensive Python solution for the coin change problem using dynamic programming:\n\n```py"
+    ]
+  },
+  "ssd_quality": {
+    "avg_tok_s": 39.7,
+    "total_tokens": 768,
+    "total_time_s": 19.34,
+    "total_nfe": 132,
+    "tok_per_nfe": 5.818,
+    "vs_dflash137": 0.29,
+    "fn": "generate_ssd_policy",
+    "config": {
+      "threshold": 0.7,
+      "editing_threshold": 0.5,
+      "do_verify_policy": "mask_span_length"
+    },
+    "sample_outputs": [
+      "Here are several Python implementations to find the longest palindromic substring, from simple to op",
+      "Here's a complete implementation of a Binary Search Tree (BST) in Python with insert, search, and de",
+      "Here's a comprehensive Python solution for the coin change problem using dynamic programming:\n\n```py"
+    ]
+  },
+  "ssd_speed": {
+    "avg_tok_s": 35.85,
+    "total_tokens": 768,
+    "total_time_s": 21.42,
+    "total_nfe": 142,
+    "tok_per_nfe": 5.408,
+    "vs_dflash137": 0.262,
+    "fn": "generate_ssd_policy",
+    "config": {
+      "threshold": 0.5,
+      "editing_threshold": 0.0,
+      "do_verify_policy": "mask_span_length"
+    },
+    "sample_outputs": [
+      "Here's a Python function that finds the longest palindromic substring using the \"expand around cente",
+      "Here's a complete implementation of a Binary Search Tree (BST) in Python with insert, search, and de",
+      "Here's a comprehensive Python solution for the coin change problem using dynamic programming:\n\n```py"
+    ]
+  },
+  "ssd_conservative": {
+    "avg_tok_s": 34.34,
+    "total_tokens": 768,
+    "total_time_s": 22.37,
+    "total_nfe": 153,
+    "tok_per_nfe": 5.02,
+    "vs_dflash137": 0.251,
+    "fn": "generate_ssd_policy",
+    "config": {
+      "threshold": 0.9,
+      "editing_threshold": 0.5,
+      "do_verify_policy": "mask_span_length",
+      "min_ssd_span_length": 1
+    },
+    "sample_outputs": [
+      "Here's a Python function that finds the longest palindromic substring using the \"expand around cente",
+      "Here's a complete implementation of a Binary Search Tree (BST) in Python with insert, search, and de",
+      "Here's a comprehensive Python solution for the coin change problem using dynamic programming:\n\n```py"
+    ]
+  }
+}
