@@ -1,0 +1,22 @@
+# SGLang dLLM (JointThreshold) for LLaDA2.1-mini on Thor SM110a.
+# Coherent prebuilt set: sglang 0.5.9 (added JointThreshold) + torch==2.9.1 + sgl-kernel==0.3.21
+# (the cu130 aarch64 wheel is built against stock torch 2.9.1). The base image ships stock torch
+# 2.10.0 AND vLLM (which pins torch==2.10.0, blocking the downgrade) -> uninstall vLLM + vision/
+# audio/codec first, then install the 2.9.1 set. Dedicated image; vLLM/DFlash keep :ddtree.
+FROM vllm-dflash-thor:ddtree
+ENV TORCH_CUDA_ARCH_LIST=11.0a \
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+RUN /opt/venv/bin/pip uninstall -y vllm torchvision torchaudio torchcodec 2>&1 | tail -2 ; \
+    /opt/venv/bin/pip install --no-cache-dir --force-reinstall --no-deps \
+      torch==2.9.1 --index-url https://download.pytorch.org/whl/cu130 && \
+    /opt/venv/bin/pip install --no-cache-dir \
+      "https://github.com/sgl-project/whl/releases/download/v0.3.21/sgl_kernel-0.3.21%2Bcu130-cp312-abi3-manylinux2014_aarch64.whl" && \
+    printf 'torch==2.9.1\nsgl-kernel==0.3.21+cu130\n' > /tmp/cons.txt && \
+    /opt/venv/bin/pip install --no-cache-dir "sglang==0.5.1.post2" --no-deps && \
+    /opt/venv/bin/pip install --no-cache-dir "sglang==0.5.9" --no-deps --extra-index-url https://pypi.org/simple/ && \
+    /opt/venv/bin/pip install --no-cache-dir \
+      orjson uvloop fastapi uvicorn aiohttp requests "python-multipart" \
+      partial_json_parser einops "transformers==4.57.3" hf_transfer modelscope \
+      "pydantic>=2" "outlines" "xgrammar" "interegular" "torchao" "compressed-tensors" \
+      "msgspec" "zmq" "pyzmq" "soundfile" "scipy" "decord" 2>&1 | tail -3 ; \
+    /opt/venv/bin/pip show torch sgl-kernel sglang 2>/dev/null | grep -E "^Name|^Version"

@@ -201,3 +201,21 @@ gated S2D2 (score_threshold + soft_entropy, gen 512) + scope d3LLM distillation 
 S2D2 honest ceiling here = break-even to +15% (training-free spec can't beat KV-cache on a forward-
 bound device); durable wins are fused kernels + distillation (d3LLM ~9.91 tok/forward @ bs1). dInfer
 LLaDA2 quant = FP8 (ModelOpt), NOT NVFP4; standalone dInfer+SGLang is the fallback w/ native 2.1 editing.
+
+## LLaDA2.1-mini vLLM diffusion serving — RUNS on our DFlash fork (2026-06-09)
+MAJOR (overturns Stage-5 "blocked"): vLLM block-diffusion serving stands up end-to-end on our
+0.20.0.dev0+dflash fork via the dllm-plugin (REAL LLaDA2ForCausalLM default + DllmRuntimeScheduler/
+Worker + V2 runner). Reaches "Application startup complete", loads weights, KV cache 36.5GiB/950k tok,
+serves /v1/models. Fixes required: (1) pip install dllm-plugin with `git config --global --add
+safe.directory '*'` (setuptools-scm); (2) patch fork flashinfer.py to pass kv_cache_sf only when
+non-None (flashinfer 0.6.6 lacks the kwarg; BF16 -> None); (3) VLLM_PLUGINS=dllm + V2 runner +
+LD_PRELOAD. Plugin registers arch LLaDA2MoeModelLM->its own class, bypassing the HF
+create_bidirectional_mask import wall. REMAINING BLOCKER (pinpointed via CUDA_LAUNCH_BLOCKING=1):
+generation crashes in the fork's AR-spec-decode Triton kernel _combine_sampled_and_draft_tokens_kernel
+(input_batch.py:280; model_runner prepare_inputs:832) — illegal memory access because DllmRuntimeScheduler
+reuses scheduled_spec_decode_tokens to carry diffusion BLOCK-drafts (block=32, num_bonus=0) and the
+AR kernel indexes that layout OOB. Fix = the dllm-fork-coherent runner draft-handoff delta (~250-400 LOC,
+route via model_state.take_draft_token_ids + dllm_prefix_lengths field; do NOT break DFlash AR spec path).
+Full writeup: eval/llada_mini/vllm_diffusion_result.md. No tok/s reported (gen doesn't complete yet).
+Both serving paths now reduce to localized low-level issues: vLLM=1 Triton draft kernel; SGLang=aarch64
+sgl-kernel/torch ABI (sgl-kernel 0.3.21->torch 2.9.1 vs image 2.10.0; source-build in progress).
