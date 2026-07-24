@@ -1,275 +1,115 @@
-# DDTree tree speculative decoding on GDN-hybrid MoE (DFlash / Qwen3.6-35B-A3B)
+# dflash-caddtree-integrations
 
-First working implementation of **tree speculative decoding on a Gated-Delta-Net
-(GDN) hybrid recurrent MoE** — the `Qwen3.6-35B-A3B` family — on top of **DFlash**
-block-diffusion drafting, running on **NVIDIA Jetson AGX Thor (SM110a)**.
+A research **monorepo** of LLM-inference experiments on **NVIDIA Jetson AGX Thor**
+(SM110a / CUDA 13 / aarch64, 128 GB unified memory). Every investigation here asks
+one version of the same question:
 
-The DDTree paper (arXiv:2604.12989) and CaDDTree (arXiv:2606.01813) evaluated only
-pure-attention models and **explicitly deferred recurrent / hybrid architectures
-as future work**, because a recurrent layer's state `S` evolves *sequentially* and
-cannot be naively shared across the branches of a verification tree. This repo
-implements and verifies the **GDN branch-state solution** that makes it possible,
-and documents the full build + debugging process end-to-end.
+> **How much decode speed can we get out of a big MoE model on a single Thor —
+> losslessly where possible, honestly measured — using speculative decoding,
+> quantization, caching, and architecture-aware kernels?**
 
-> **Status (honest):** DDTree is **implemented and verified correct** on the
-> GDN-hybrid (coherent output, correct multi-branch acceptance, W=1 byte-identical,
-> 0 invariant violations). It was optimized **3.6×** (spine fix + GDN per-branch
-> fusion + CUDA graphs) but **does not beat strong-draft linear DFlash**: at the
-> feasible budget B=13 it is the spine-only chain (= linear + per-step overhead),
-> and larger budgets are depth-dominated (depth beats breadth for a strong draft).
->
-> **The actual win came from elsewhere.** Probing at *production temperatures*
-> revealed that **linear DFlash + typical (Medusa-style) acceptance** gives
-> **+11% tok/s and +17% τ at T=0.3** (90.7 vs 82 tok/s, CUDA graphs),
-> byte-identical at T=0. The lever is the *acceptance criterion*, not the tree —
-> and it belongs on the lean linear path (the tree only adds overhead). See
-> `benchmark_results/staged-optimization-final.md`.
+The through-line is **DFlash** (block-diffusion speculative drafting, arXiv:2602.06036)
+running in a **vLLM `0.20.0.dev0+dflash` fork**, applied to two model families:
+
+- **GDN-hybrid MoE** — the `Qwen3.x` family (Gated-Delta-Net recurrent + attention
+  hybrid; 27B, 35B-A3B, 122B-A10B), and
+- **Block-diffusion MoE** — `LLaDA2.1-mini` (a 16B diffusion LM).
+
+Several experiments produced **clean negative or "already-solved" results**. Those are
+kept and documented as first-class outcomes — the repo is a faithful characterization
+of what does and does not move the needle on this hardware, not a highlight reel.
 
 ---
 
-## 1. The idea
+## What's in here (map of investigations)
 
-DFlash drafts `K` tokens in **one parallel forward** by predicting `K` masked
-positions; it then keeps only the top-1 token per position and verifies a single
-linear chain. But that one forward already produces `K` rich per-position marginal
-distributions `q_1..q_K`. DDTree turns those marginals into a **tree** of candidate
-continuations and verifies the whole tree in **one** target forward, accepting the
-best matching root→leaf path — more accepted tokens per step, same draft cost.
+| Area | Question | Honest result | Entry doc |
+|------|----------|---------------|-----------|
+| **DDTree** (root: `src/`, `patches/`, `benchmark_results/`, `image-src/`) | Can tree speculative decoding work on a **recurrent GDN-hybrid** (which the DDTree/CaDDTree papers deferred as future work)? | ✅ **First working + verified-correct** tree spec-decode on GDN-hybrid (6 branch-state invariants, W=1 byte-identical). Optimized 3.6×, but **does not beat strong-draft linear DFlash** at feasible budgets (depth beats breadth). The real win moved to the linear path (typical acceptance). | [`docs/DDTREE.md`](docs/DDTREE.md) |
+| **`no_train_suite/`** | Which **training-free** inference optimizations actually help DFlash + GDN-hybrid? | ✅ **Typical (Medusa-style) acceptance = +26–27% tok/s @ T=0.3** on 27B/122B, **byte-identical at T=0**. Most other stages proved **moot / already-fused / device-moot** on Thor's unified memory — a deliberate negative-heavy audit. | [`no_train_suite/SUITE_SUMMARY.md`](no_train_suite/SUITE_SUMMARY.md) |
+| **`gdn_apc/`** | Can **automatic prefix caching** coexist with DFlash spec-decode on a recurrent hybrid? | ✅ **Correct + 1.66× e2e** on a 11.8k-tok / 4-turn agentic trace (cold==warm **bitwise**). Bitwise *base*-parity is **not achievable** — a property of all spec decode, **not** an APC corruption. | [`gdn_apc/GDN_APC_SUMMARY.md`](gdn_apc/GDN_APC_SUMMARY.md) |
+| **`innovation_suite/`** | Autonomous **upstream-contribution + long-context eval** run | Key finding: **most planned bugfixes already landed upstream** (no redundant PRs). One novel branch authored (**DroPE** rope_type). Long-context (LongRoPE / YaRN / DroPE / LongPPL) = **negatives**: inference-time tricks don't beat std-RoPE on GDN-hybrid. | [`innovation_suite/INNOVATION_SUITE_SUMMARY.md`](innovation_suite/INNOVATION_SUITE_SUMMARY.md) |
+| **`innovation_suite/eval/llada_mini/`** | Fastest inference stack for **LLaDA2.1-mini block-diffusion** on Thor | ✅ **vLLM block-diffusion GENERATES on our fork → tuned 90.7 tok/s** (1.40× the 64.9 raw-transformers floor) via a gated 14-file pure-Python port + flashinfer non-causal + denoise-threshold speed mode. NVFP4 loads (CUTLASS FP4) but is a memory win only at concurrency-1; SGLang blocked on aarch64 ABI. | [`innovation_suite/eval/llada_mini/`](innovation_suite/eval/llada_mini/) |
 
-Per-position **top-W lattice with factorized joint** `Q(Y_{1:L}) = ∏_i q_i(Y_i)`:
-this is exactly what DFlash's parallel marginals provide, so DDTree's best-first
-heap (Algorithm 1) applies directly — no conditional re-drafting.
-
-### Why GDN makes this hard
-
-The 30 GDN (linear-attention) layers maintain a fixed-size recurrent state that
-updates sequentially per token: `S_new = α·S_old + β·(k⊗v)`. In a verification
-**tree**, each branch is a *different* continuation of `S`. If two branches share
-a state slot, the second write corrupts the first. Standard tree attention (for
-the 10 full-attention layers) does not solve this — the recurrent state needs its
-own branch-correct bookkeeping. That is the contribution here.
+Each area has its own summary/results docs; this README is the index and the shared
+context. Detailed per-file change maps live in each area (e.g. `CHANGES.md` for DDTree).
 
 ---
 
-## 2. The six GDN branch-state invariants
+## The shared method (why the results are trustworthy)
 
-| # | Invariant | How it's satisfied |
-|---|-----------|--------------------|
-| 1 | One state slot per tree **node** (children read parent's state), not per sequence | `abstract.py` reserves `node_budget+1` GDN state blocks/seq; `gdn_attn.py` lays out per-node slots |
-| 2 | All branches initialised from a **copy** of the canonical (accepted) state at the fork | root node = canonical slot; depth-1 nodes seed from it |
-| 3 | Recurrence must **not** write in place over canonical during tree verify | per-node depth-batched kernel seeds from the parent slot and writes the node slot; canonical only read (verified: 273/273 untouched) |
-| 4 | Branch identity threaded to the GDN forward | via `GDNAttentionMetadata` (not `ForwardContext`): `tree_flat_pos/node_slots/parent_slots` |
-| 5 | Atomic, exact state **promotion** on acceptance | accepted leaf's state copied to `slot[num_accepted-1]` so existing align-mode `postprocess_mamba` carries it across the buffer rotation |
-| 6 | `tree_width=1` is **byte-identical** to linear DFlash | all tree code gated on `tree_width>1`; the 6-test suite passes byte-identical at W=1 |
+Every experiment in this repo follows the same discipline:
 
-**Key kernel result (no new CUDA needed for correctness):** the existing batched
-`fused_sigmoid_gating_delta_rule_update` already supports tree branch-state. Each
-tree node is processed as a 1-token "sequence" seeded from its parent's slot via a
-`num_accepted=2` trick (`ssm_state_indices=[node_slot, parent_slot]`, T=1 → kernel
-seeds slot[1]=parent, writes slot[0]=node), **batched per BFS depth** so every
-parent is written before its children. Validated to **0.0 diff** vs a sequential
-reference chain (`tests/test_branch_kernel.py`, and the in-situ W=2 state test).
+1. **Bitwise correctness is sacred.** Lossless changes must be **byte-identical at
+   T=0** (real token-ID diff, not eyeballing). Nothing that diverges at greedy ships.
+   Lossy wins (e.g. typical acceptance) are **opt-in and T>0 only**, with a T=0 guard.
+2. **No fabricated numbers.** Gates that couldn't be run are marked NOT-EXECUTED;
+   a clean negative result is reported as-is. Several headline outcomes here *are*
+   negatives.
+3. **Overlay-image workflow.** Work is authored against **byte-identical copies of a
+   frozen base image's own files** and shipped as a **COPY-only overlay** image
+   (`Dockerfile.ddtree` etc.) — no recompile, fast, reproducible. `src_original/`
+   holds pre-change originals so `patches/*.diff` are self-contained.
+4. **Fork, don't PR.** Genuine upstream changes are GPG-signed and pushed to a
+   **personal fork for human review** — never opened against `vllm-project` directly
+   (per vLLM's `AGENTS.md`; pure code-agent PRs are disallowed).
+5. **One heavy job at a time.** Thor's 128 GB is *unified* memory — a GPU serve
+   reserving a mem-fraction plus a concurrent compile can OOM the box. Launchers
+   enforce serialization + cgroup `--memory` caps + graceful stop (learned the hard way).
 
 ---
 
-## 3. Architecture / data flow
+## Platform
+
+- **Hardware:** NVIDIA Jetson AGX Thor, **SM110a** (Blackwell-class), CUDA 13, aarch64,
+  128 GB unified LPDDR.
+- **Runtime:** vLLM **`0.20.0.dev0+dflash`** fork (image tags `:fa-native`, `:ddtree`,
+  `:dllm`). V1 engine / V2 model runner.
+- **Draft method:** **DFlash** — parallel block-diffusion drafting (K masked positions
+  in one forward).
+- **Models:** Qwen3.x GDN-hybrid MoE (27B / 35B-A3B / 122B-A10B, NVFP4/compressed-tensors);
+  LLaDA2.1-mini block-diffusion MoE (BF16 + NVFP4).
+
+---
+
+## Repository layout
 
 ```
-DFlash draft (1 parallel fwd)                 Target verify (1 fwd over the tree)
-  K position marginals q_1..q_K                 30 GDN layers: per-node depth-batched
-        │                                          recurrence (parent→child slots)
-        ▼                                       10 full-attn layers: eager combined
-  DDTreeHeap.build  ──►  prefix-closed tree T*     mask = [context(all) | ancestor]
-   (ddtree.py)          B≤node_budget nodes               (qwen3_next.py)
-        │                     │                              │
-        ▼                     ▼                              ▼
-  flat draft tokens     ancestor matrix              target logits per node
-  (proposer Change 0)   + per-node GDN schedule              │
-        │               (gdn_attn.py build)                  ▼
-        ▼                                            tree-aware acceptance
-  scheduler schedules B-1 draft tokens               (rejection_sampler _tree_accept):
-        │                                            walk T* following target greedy
-        ▼                                            after each node → accepted path
-  runner: tree RoPE positions (depth-based),                 │
-   decoupled from KV slot-mapping (Change A)                 ▼
-                                                     promote accepted leaf's GDN
-                                                     state → canonical (Change D)
+README.md                      ← this file (monorepo index)
+docs/
+  DDTREE.md                    ← DDTree subproject writeup (the former root README)
+  IMPLEMENTATION_PLAN.md       ← DDTree invariant→file contract
+CHANGES.md                     ← DDTree per-file change map + flat-pos convention
+IMPLEMENTATION_NOTES.md        ← DDTree design notes / proofs
+Dockerfile.ddtree             ← DDTree overlay build (COPY-only, no recompile)
+src/ , src_original/ , patches/, image-src/   ← DDTree code, originals, diffs
+benchmark_results/            ← DDTree + staged-optimization + LongRoPE/LongPPL results
+tests/                        ← DDTree invariant + synthetic suites
+
+no_train_suite/               ← training-free DFlash optimizations (typical acceptance, audits)
+  SUITE_SUMMARY.md, designs/, benchmarks/, correctness/, profiles/
+
+gdn_apc/                      ← GDN prefix caching under DFlash spec-decode
+  GDN_APC_SUMMARY.md, benchmarks/, correctness/, designs/
+
+innovation_suite/            ← autonomous upstream-contribution + long-context eval
+  INNOVATION_SUITE_SUMMARY.md, SUITE_NOTES.md, designs/ (RFCs), pr_drafts/, tools/
+  eval/
+    llada_mini/              ← LLaDA2.1-mini block-diffusion serving + optimization sweep
+    longrope_research.md, RULER_GATING.md, attestation/
 ```
 
-**Flat-position convention (the one fact to remember):** the verify query has `B`
-positions where **flat pos `i` == tree node `i`**, and **flat pos 0 = root = the
-bonus/previously-accepted token**. Every module uses this identity mapping. (See
-`CHANGES.md`; an early off-by-one here caused incoherent output + zero acceptance.)
-
 ---
 
-## 4. Repository layout
+## Where to start
 
-```
-README.md                     ← this file
-CHANGES.md                    ← per-file change map + flat-pos convention
-docs/IMPLEMENTATION_PLAN.md   ← the original contract / invariant→file plan
-Dockerfile.ddtree            ← overlay build (FROM fa-native, COPY .py files)
-src/vllm/...                  ← FULL modified + new files at real vLLM paths
-src_original/vllm/...         ← pre-change originals (so diffs are self-contained)
-patches/*.diff               ← unified git-style diffs (apply with `git apply`)
-patches/ALL.combined.diff    ← all diffs concatenated
-tests/                       ← invariant suite + fast synthetic + spike tests
-benchmark_results/           ← ddtree-gdn.md (table + analysis) + raw log
-```
-
-The 10 changed/new files (8 modified + 2 new) are listed with roles in
-`CHANGES.md`. New modules: `ddtree.py`, `ddtree_state.py`.
-
----
-
-## 5. How it was built (process narrative)
-
-This was developed against a **frozen** base image (`vllm-dflash-thor:fa-native`)
-whose installed vLLM is **not reproducible from the `~/vllm` fork HEAD** (HEAD has
-the #41126 mamba refactor the image predates; the image's file blobs are not in the
-repo). So the strategy was: **author against byte-identical copies of the image's
-own files** and ship an **overlay image** (`Dockerfile.ddtree`, COPY only — no
-recompile). Forward-porting to the public fork HEAD is a separate diff.
-
-Order of work and gates:
-
-1. **Characterise** the image: GDN mixer (`gdn_linear_attn.py`), the spec GDN
-   kernel (`fused_sigmoid_gating`), `GDNAttentionMetadata` (already has a *linear*
-   multi-slot spec mechanism — `spec_state_indices`, `num_accepted_tokens`), the
-   DFlash proposer (`llm_base_proposer.propose`, parallel drafting), and the
-   runner. Found: **no tree-attention infra**; runner hardwires a flat
-   `num_spec_tokens=12` draft → **node budget B≤13** without a scheduler rewrite.
-2. **Test harness first**: in-process `vllm.LLM` (single-process), GDN state
-   captured by monkeypatching the spec kernel. 6-test invariant suite established
-   on linear DFlash (all pass; W=1 reference saved).
-3. **Validate the two cores fast (no model load):** the per-node parent-seed
-   kernel trick (0.0 diff) and the DDTree builder (W=1→linear, prefix-closed,
-   budget-capped, correct ancestor mask).
-4. **Implement** in order, rebuilding the overlay + gating after each:
-   `4a` allocator → `4c` GDN metadata builder → `Change 0` proposal →
-   `D10` GDN per-node depth-batched recurrence (W=2 state test: INV3 273/273
-   canonical-untouched, 273/273 node divergence) → `A/B/C/D` positions / metadata
-   / tree acceptance / promotion → `D11` ancestor-masked verify attention.
-5. **D11 was the hard part.** FlexAttention (the obvious ancestor-mask route) is
-   **framework-incompatible** here: the hybrid forces a non-power-of-2 attention
-   block size (1152) and FlexAttention's Triton kernel requires power-of-2
-   `BLOCK_N` (`arange's range must be a power of 2`). Pivoted to an **eager
-   combined-mask SDPA** inside `Qwen3NextAttention.forward`: gather context K/V
-   from the paged cache, concat the spec K/V, one GQA `scaled_dot_product_attention`
-   with mask `[context=all | spec=ancestor]`.
-6. **First W=2 run was incoherent** → diagnosed via instrumentation to an
-   **off-by-one** in the flat-pos↔node mapping (query is `[root, node1..node12]`,
-   13 positions, not 12). Fixing all four sites to the identity mapping →
-   **coherent valid code + multi-token acceptance**.
-
----
-
-## 6. Configuration
-
-Development uses env vars (config-field wiring is future work):
-
-| env | meaning | default |
-|-----|---------|---------|
-| `DFLASH_TREE_WIDTH` | top-W per position; `1` = linear DFlash | `1` |
-| `DFLASH_NODE_BUDGET` | max GDN state slots reserved (tree node budget) | `num_speculative_tokens` |
-
-Engine config (mirrors `serve-35b.sh`): `quantization=compressed-tensors`,
-`kv_cache_dtype=auto` (BF16), `num_speculative_tokens=12`, `gpu_memory_utilization=0.78`,
-`enforce_eager=True` (tree path is eager; CUDA graphs are future work),
-`VLLM_ENABLE_V1_MULTIPROCESSING=0` for the in-process test harness.
-
----
-
-## 7. Benchmark (Jetson AGX Thor SM110a, T=0) + optimization arc
-
-W=2 DDTree was optimized **3.6×** (15.4 → 56.2 tok/s) via three changes:
-
-| W=2 stage | mode | τ | tok/s |
-|-----------|------|--:|------:|
-| bushy tree (no spine guarantee) | eager | 3.14 | 15.44 |
-| + **spine fix** (full top-1 chain always in tree) | eager | 5.48 | 22.51 |
-| + **GDN per-branch fusion** (single launch vs per-depth loop) | eager | 5.48 | 25.70 |
-| + **CUDA graphs** | graphs | 5.70 | **56.23** |
-
-**Head-to-head, both CUDA graphs (apples-to-apples):**
-
-| Config | τ | tok/s | vs linear |
-|--------|--:|------:|----------:|
-| W=1 linear DFlash | 5.75 | **78.0** | baseline |
-| W=2 DDTree (B=13) | 5.70 | **56.23** | 0.72× (28% slower) |
-
-**Key finding:** after the spine fix, **τ_tree ≈ τ_linear** (5.70 vs 5.75) — the
-tree no longer wastes steps. But at budget **B=13** the tree is the spine-only
-chain (12-deep spine + root = 13, **zero spare for branches**), so it equals
-linear in acceptance and can only be *slower* by the residual per-step overhead.
-**DDTree beats linear only when τ_tree > τ_linear ⇒ real branches ⇒ B ≫ K**,
-which is capped at K+1=13 by the runner's flat `num_speculative_tokens` and needs
-the scheduler rewrite. DFlash's draft is already strong (τ≈5.7), so tree breadth
-adds little at a tight budget. Full analysis + correctness in
-`benchmark_results/ddtree-gdn.md`.
-
----
-
-## 7b. Does breadth beat linear? (B≫K investigation — answered: no)
-
-After overhead reduction, W=2 (56 tok/s) still trails linear (78) because at B=13
-the tree is the spine-only chain (= linear + overhead). The only way to win is
-τ_tree > τ_linear via real branches (B ≫ K). We probed this **before** the large
-scheduler rewrite (`benchmark_results/b-sweep-crossover.md`):
-
-- **τ-ceiling probe** (offline, real W=1 draft top-2 + target greedy): breadth's
-  headroom is **thin, +5–18%** (branch-catch rate 32%).
-- **Real B>K test** (num_spec=16, spine capped at 12, B=17, ~4 branches):
-  multi-branch verification is **correct** (accepted paths of 11–12 tokens
-  observed; ancestor mask + GDN routing verified), but at a **fixed budget,
-  depth beats breadth**: spine-16 (τ 5.82) > spine-12 + 4 branches (τ 4.26).
-
-**Conclusion:** for DFlash's strong draft (τ≈6), a deeper spine accepts more than
-a shallow spine + branches; breadth only helps on early spine errors (rare). The
-probe's modest headroom needs B ≫ K (full-depth spine + extra branch budget = the
-#42121-class scheduler rewrite) and is thin even then. **DDTree works correctly on
-GDN-hybrid MoE but does not beat strong-draft linear DFlash at feasible budgets;
-it pays off for weaker drafts or much larger budgets.**
-
-## 8. Limitations / future work (to realize speedup)
-
-- **Fused multi-branch GDN kernel** (one parent-indexed launch) to remove the
-  per-depth Python loop and the redundant baseline call.
-- **Triton ancestor-mask attention** (or fix FlexAttention's power-of-2 block
-  constraint for hybrid models) so the full-attn verify is a single masked kernel
-  with no discarded `self.attn` and no host gather.
-- **CUDA graphs** for the verify forward (disabled by `enforce_eager`).
-- Node budget capped at `B≤13` (the runner's flat `num_speculative_tokens`
-  assumption); larger trees need a scheduler change.
-- Batch size 1 (single-sequence DFlash decode) in the current tree path.
-- Tree (eager) vs linear (flash) can differ at greedy near-ties (kernel numerics).
-
----
-
-## 9. Reproduce
-
-```bash
-# Build the overlay image (no recompile; ~seconds)
-docker build -f Dockerfile.ddtree -t vllm-dflash-thor:ddtree .
-
-# W=1 invariant suite (must be byte-identical to linear)
-docker run --rm --runtime nvidia --gpus all \
-  -e VLLM_ENABLE_V1_MULTIPROCESSING=0 -e DFLASH_TREE_WIDTH=1 \
-  -v $MODEL:/model:ro -v $DRAFT:/drafter:ro -v $PWD/tests:/tests \
-  --entrypoint /opt/venv/bin/python vllm-dflash-thor:ddtree \
-  /tests/test_gdn_tree_invariants.py
-
-# W=2 tree generation
-... DFLASH_TREE_WIDTH=2 ... /tests/_w2_smoke.py
-```
-
-Apply the diffs to a matching vLLM tree:
-```bash
-git apply patches/ALL.combined.diff     # against src_original/ layout
-```
+- **Want the headline speedups?** → `no_train_suite/SUITE_SUMMARY.md` (typical
+  acceptance) and `innovation_suite/eval/llada_mini/vllm_optimization_results.md`
+  (block-diffusion, 90.7 tok/s).
+- **Want the deep architecture work?** → [`docs/DDTREE.md`](docs/DDTREE.md) (tree
+  spec-decode on a recurrent hybrid, the six GDN branch-state invariants).
+- **Want the honest negatives?** → `innovation_suite/` (long-context RoPE variants) and
+  the "moot/deferred" tables in `no_train_suite/SUITE_SUMMARY.md`.
 
 ## References
-- DDTree — arXiv:2604.12989
-- CaDDTree — arXiv:2606.01813
-- DFlash — arXiv:2602.06036
+- DFlash — arXiv:2602.06036 · DDTree — arXiv:2604.12989 · CaDDTree — arXiv:2606.01813
