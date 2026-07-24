@@ -21,6 +21,46 @@ of what does and does not move the needle on this hardware, not a highlight reel
 
 ---
 
+## Architecture at a glance
+
+One shared stack (Thor → vLLM dflash fork → DFlash drafting) feeds two model families,
+each with its own line of investigation. Every box is held to the same correctness method.
+
+```mermaid
+flowchart TB
+    subgraph PLATFORM["Platform — NVIDIA Jetson AGX Thor · SM110a · CUDA 13 · aarch64 · 128 GB unified memory"]
+        RT["vLLM 0.20.0.dev0+dflash fork · V1 engine / V2 model runner<br/>overlay images :fa-native → :ddtree → :dllm (COPY-only, no recompile)"]
+    end
+
+    RT --> DFLASH["DFlash — block-diffusion speculative drafting<br/>K masked positions predicted in one parallel forward"]
+
+    DFLASH --> GDN["GDN-hybrid MoE — Qwen3.x<br/>27B · 35B-A3B · 122B-A10B"]
+    DFLASH --> DIFF["Block-diffusion MoE — LLaDA2.1-mini · 16B"]
+
+    subgraph GDNWORK["Investigations on GDN-hybrid + DFlash"]
+        DDTREE["DDTree · tree spec-decode on a recurrent hybrid<br/>✅ verified correct (6 branch-state invariants) — doesn't beat linear"]
+        NOTRAIN["no_train_suite · training-free optimizations<br/>✅ typical acceptance +26–27% tok/s @T0.3, byte-identical @T0"]
+        APC["gdn_apc · prefix caching under spec-decode<br/>✅ correct + 1.66× e2e agentic (cold==warm bitwise)"]
+        INNOV["innovation_suite · upstream contribution + long-context eval<br/>DroPE authored · long-context RoPE variants = negatives"]
+    end
+
+    subgraph DIFFWORK["Investigation on block-diffusion"]
+        LLADA["eval/llada_mini · vLLM diffusion serving port<br/>✅ generates → tuned 90.7 tok/s (1.40× the 64.9 floor)"]
+    end
+
+    GDN --> DDTREE
+    GDN --> NOTRAIN
+    GDN --> APC
+    GDN --> INNOV
+    DIFF --> LLADA
+
+    METHOD["Shared method governing every box above<br/>bitwise-T0 correctness gate · no fabricated numbers (negatives kept)<br/>overlay-image workflow · fork-not-PR · one heavy GPU job at a time"]
+    GDNWORK -. audited under .-> METHOD
+    DIFFWORK -. audited under .-> METHOD
+```
+
+---
+
 ## What's in here (map of investigations)
 
 | Area | Question | Honest result | Entry doc |
