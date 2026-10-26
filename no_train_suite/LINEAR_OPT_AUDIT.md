@@ -31,7 +31,7 @@ Baseline tag: **`linear-opt-baseline` EXISTS** (in the companion repo, not `~/vl
 
 **Counts: GREEN 0 · YELLOW 5 (items 0,1,7,8,14; item 15 informational) · RED 0 · GREY 9 (items 2,3,4,5,6,9,10,11,12,13).**
 
-> **Critical context:** A committed design-first finding (`IMPLEMENTATION_NOTES.md`,
+> **Critical context:** A committed design-first finding (`../docs/ddtree/IMPLEMENTATION_NOTES.md`,
 > commit `d653d1d`) establishes that items **3, 4, 6 are MOOT for DFlash's greedy +
 > factorized draft** — they provide no lossless gain (proof in that doc). They are
 > GREY not because they're pending implementation but because implementation was
@@ -86,7 +86,7 @@ GDN/MoE/attention layer that dequant-then-computes. (This is the no-train suite'
 **Status:** NOT STARTED — **design-determined MOOT**  **Correct:** N/A  **Flag:** GREY
 **Files inspected:** `rejection_sampler.py` — no `block_verify` / `backward_induction`
 flag or logic (NOT FOUND). `DFLASH_BLOCK_VERIFY` absent.
-**Implementation summary:** Not implemented, by design. `IMPLEMENTATION_NOTES.md` proves
+**Implementation summary:** Not implemented, by design. `../docs/ddtree/IMPLEMENTATION_NOTES.md` proves
 that for a *deterministic* proposal (DFlash drafts greedily, `_greedy_sample` = argmax),
 exact-match is already the lossless-optimal accept (max accept prob = p_i(proposed)); block
 verification gains only exist for a *stochastic* draft.
@@ -209,7 +209,7 @@ range tuning for adaptive-K pad-and-mask or batch>1 headroom.
   - `no_train_suite/final_benchmark_plan.md` (2026-06-07)
   - `no_train_suite/backups/manifest.md` (2026-06-07, header only — no entries)
   - `no_train_suite/LINEAR_OPT_AUDIT.md` (this file)
-  - `IMPLEMENTATION_NOTES.md` (repo root — linear-opt finding chain)
+  - `../docs/ddtree/IMPLEMENTATION_NOTES.md` (repo root — linear-opt finding chain)
   - `benchmark_results/`: `ddtree-gdn.md`, `b-sweep-crossover.md`,
     `staged-optimization-final.md`, `stage5-tree-wy-flop-analysis.md`, `raw_bench.log`
 **Files missing (expected by the no-train suite):**

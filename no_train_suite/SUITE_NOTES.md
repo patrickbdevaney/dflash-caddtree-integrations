@@ -43,7 +43,7 @@ k≈4–12** (52.7–56.3, max at k=12). Verdict: adaptive-K is *applicable* but
 defaulted to single-turn regime: [F, A+E, B, D, G]; Stage C (prefix caching) deferred until
 a real agentic trace justifies its large fail-quiet cost.
 
-**Design-first finding carried from Tier 1** (`../IMPLEMENTATION_NOTES.md`): the lossless
+**Design-first finding carried from Tier 1** (`../docs/ddtree/IMPLEMENTATION_NOTES.md`): the lossless
 acceptance stages (block-verify, per-position temp, fat-chain) are MOOT for DFlash's greedy +
 factorized draft. Audit (`LINEAR_OPT_AUDIT.md`): only typical acceptance landed (lossy, T>0,
 in-process bench only); it had a missing T=0 greedy guard (fix in progress, item7-t0-guard).

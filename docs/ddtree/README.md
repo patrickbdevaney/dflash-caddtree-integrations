@@ -1,9 +1,9 @@
 # DDTree tree speculative decoding on GDN-hybrid MoE (DFlash / Qwen3.6-35B-A3B)
 
 > **This is the DDTree subproject writeup** (formerly the repo root README). See
-> [`../README.md`](../README.md) for the monorepo overview and the other investigations.
-> File paths below (`src/`, `patches/`, `benchmark_results/`, `CHANGES.md`, …) are
-> **relative to the repository root**, one level up from this `docs/` file.
+> [`../../README.md`](../../README.md) for the monorepo overview and the other investigations.
+> File paths below (`src/`, `patches/`, `benchmark_results/`, `docs/ddtree/CHANGES.md`, …) are
+> **relative to the repository root**, two levels up from this `docs/ddtree/` file.
 
 First working implementation of **tree speculative decoding on a Gated-Delta-Net
 (GDN) hybrid recurrent MoE** — the `Qwen3.6-35B-A3B` family — on top of **DFlash**
@@ -104,17 +104,17 @@ DFlash draft (1 parallel fwd)                 Target verify (1 fwd over the tree
 **Flat-position convention (the one fact to remember):** the verify query has `B`
 positions where **flat pos `i` == tree node `i`**, and **flat pos 0 = root = the
 bonus/previously-accepted token**. Every module uses this identity mapping. (See
-`CHANGES.md`; an early off-by-one here caused incoherent output + zero acceptance.)
+`docs/ddtree/CHANGES.md`; an early off-by-one here caused incoherent output + zero acceptance.)
 
 ---
 
 ## 4. Repository layout
 
 ```
-docs/DDTREE.md                ← this file (DDTree subproject writeup)
-../README.md                  ← monorepo index (all investigations)
-CHANGES.md                    ← per-file change map + flat-pos convention
-docs/IMPLEMENTATION_PLAN.md   ← the original contract / invariant→file plan
+docs/ddtree/README.md                ← this file (DDTree subproject writeup)
+README.md                        ← monorepo index (all investigations)
+docs/ddtree/CHANGES.md                    ← per-file change map + flat-pos convention
+docs/ddtree/IMPLEMENTATION_PLAN.md   ← the original contract / invariant→file plan
 Dockerfile.ddtree            ← overlay build (FROM fa-native, COPY .py files)
 src/vllm/...                  ← FULL modified + new files at real vLLM paths
 src_original/vllm/...         ← pre-change originals (so diffs are self-contained)
@@ -125,7 +125,7 @@ benchmark_results/           ← ddtree-gdn.md (table + analysis) + raw log
 ```
 
 The 10 changed/new files (8 modified + 2 new) are listed with roles in
-`CHANGES.md`. New modules: `ddtree.py`, `ddtree_state.py`.
+`docs/ddtree/CHANGES.md`. New modules: `ddtree.py`, `ddtree_state.py`.
 
 ---
 
